@@ -1,0 +1,13 @@
+# python bytecode
+__pycache__/
+
+# virtual env
+venv/
+
+# Packaging/build artifacts
+*.egg-info/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
