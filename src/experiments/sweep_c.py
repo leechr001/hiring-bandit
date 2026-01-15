@@ -6,8 +6,6 @@ from simulation import run_c_sweep
 k = 10
 m = 3
 T = 1000
-# Example true means (you can swap this out for whatever instance you like)
-# Sorted so that workers 1..m are optimal, etc.
 
 means = np.linspace(0.1, 0.9, k).tolist()
 

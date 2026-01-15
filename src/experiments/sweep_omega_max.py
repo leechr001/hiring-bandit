@@ -6,8 +6,9 @@ from simulation import run_omega_sweep
 k = 30
 m = 5
 T = 1000
-# Example true means (you can swap this out for whatever instance you like)
-# Sorted so that workers 1..m are optimal, etc.
+
+# set common upper limit on y axis for compairson
+y_up_lim = 1000
 
 means = np.linspace(0.1, 0.9, k).tolist()
 
@@ -24,7 +25,7 @@ run_omega_sweep(
     omega_max_values=omega_max_values,
     omega_process = "stochastic",
     n_runs=20,
-    y_up_lim=1000
+    y_up_lim=y_up_lim
 )
 
 run_omega_sweep(
@@ -37,6 +38,6 @@ run_omega_sweep(
     omega_max_values=omega_max_values,
     omega_process = "adversarial",
     n_runs=20,
-    y_up_lim=1000
+    y_up_lim=y_up_lim
 )
 

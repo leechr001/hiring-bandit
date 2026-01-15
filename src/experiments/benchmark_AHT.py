@@ -1,6 +1,5 @@
 from simulation import run_policy_comparisons
 
-
 policies = [
     "hiring-ucb-gamma-1", 
     "hiring-ucb-gamma-2",
