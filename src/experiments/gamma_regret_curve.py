@@ -10,8 +10,6 @@ k = 10
 m = 3
 T = 10000
 
-# Example true means (you can swap this out for whatever instance you like)
-# Sorted so that workers 1..m are optimal, etc.
 means = np.linspace(0.9, 0.5, k).tolist()
 
 c = 10
