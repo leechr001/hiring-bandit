@@ -1,8 +1,21 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Sequence
+from typing import List, Tuple, Sequence, Callable
 
 import random
+
+def make_bijection(bijection_name:str) -> Callable:
+    """
+    Factory to build bijections that be reused between policies.
+    """
+    if bijection_name.lower() in ('random', 'stochastic'):
+        return random_bijection
+    elif bijection_name.lower() in ('oracle-match', 'rank-matching', 'rm', 'best'):
+        return oracle_rank_matching_bijection
+    elif bijection_name.lower() in ('oracle-mismatch', 'rank-mismatching', 'rmm', 'worst'):
+        return oracle_rank_mismatching_bijection
+    
+    raise ValueError(f"{bijection_name} is not recognized")
 
 def random_bijection(
     current: Sequence[int],
@@ -33,6 +46,29 @@ def oracle_rank_matching_bijection(
 
     remove = sorted(cur_set - tar_set)
     add = sorted(tar_set - cur_set)
+
+    # Defensive truncation if environment sizes mismatch.
+    if len(remove) != len(add):
+        n = min(len(remove), len(add))
+        remove, add = remove[:n], add[:n]
+
+    return list(zip(remove, add))
+
+def oracle_rank_mismatching_bijection(
+    current: Sequence[int],
+    target: Sequence[int]
+) -> List[Tuple[int, int]]:
+    """
+    Construct a rank matching objective based on true means
+    """
+    cur_set = set(current)
+    tar_set = set(target)
+
+    remove = sorted(cur_set - tar_set)
+    add = sorted(tar_set - cur_set)
+
+    # reverse the list so ranks are most different
+    add.reverse()
 
     # Defensive truncation if environment sizes mismatch.
     if len(remove) != len(add):

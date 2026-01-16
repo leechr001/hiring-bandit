@@ -53,6 +53,13 @@ def make_policy(
 
     elif name in {"ucb", "vanilla-ucb", "vanilla ucb"}:
         return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, rng=rng)
+    
+    # Construct UCB with different bijections for experiements
+    elif name in {"ucb-rm"}:
+        return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', rng=rng)
+    
+    elif name in {"ucb-rmm"}:
+        return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
     # Adaptive batching algorithm from the paper
     elif name in {"hiring-ucb", "hiring ucb", "paper", "algorithm-1"}:
@@ -208,22 +215,30 @@ def run_policy_comparisons(
     T: int,
     c: float,
     omega_max: int,
-    means: Optional[Sequence[float]] = None,
+    means: Sequence[float],
+    delay_process_name: str = 'uniform',
     labels: Optional[Sequence[str]] = None,
     n_runs: int = 20,
     base_seed: int = 12345,  
+    title: str = 'Regret by Policy'
 ) -> None:
     
     if labels is None:
         labels = policies
 
-    # --- Run simulation for gamma1 ---
+    if delay_process_name in {'uniform', 'random', 'stochastic', 'iid'}:
+        sampler = make_uniform_delay_sampler(omega_max)
+    elif delay_process_name in {'adversarial', 'wc'}:
+        sampler = make_adversarial_delay(means=means, omega_max=omega_max)
+
+    # --- Run simulation ---
     means, results = simulate(
         policies=policies,
         k=k,
         m=m,
         T=T,
         means=means,
+        delay_sampler=sampler,
         c=c,
         omega_max=omega_max,
         n_runs=n_runs,
@@ -249,7 +264,7 @@ def run_policy_comparisons(
 
     plt.xlabel("Time t")
     plt.ylabel("Cumulative pseudo-regret")
-    plt.title(r"Performance of Hiring-UCB for two theoretical choices of $\gamma$")
+    plt.title(title)
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -461,7 +476,7 @@ def run_omega_sweep(
     plt.xlabel("t")
     plt.ylabel("Cumulative regret")
     plt.ylim(0,y_up_lim)
-    plt.title(rf"Average regret over {n_runs} runs with $c = {c}$ with {omega_process} delay process.")
+    plt.title(rf"Average regret over {n_runs} runs with $c = {c}$ and {omega_process} delay process.")
     plt.grid(True, which="both", linestyle="--", alpha=0.5)
     plt.legend()
     plt.tight_layout()

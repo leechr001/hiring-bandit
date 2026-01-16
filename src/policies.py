@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from bijections import random_bijection
+from bijections import make_bijection
 
 import math
 import random
@@ -29,6 +29,7 @@ class DelayedActionPolicy(ABC):
         *,
         c: float = 0.0,
         omega_max: int = 0,
+        bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
     ) -> None:
         if not isinstance(k, int) or k <= 0:
@@ -42,6 +43,9 @@ class DelayedActionPolicy(ABC):
         # Optional parameters used by some delayed-action policies.
         self.c = float(c)
         self.omega_max = int(omega_max)
+
+        # Set the type of bijection to be used
+        self.bijection = make_bijection(bijection_name)
 
         # Default seeded RNG for reproducibility unless caller supplies one.
         self.rng = rng or random.Random(123)
@@ -73,7 +77,7 @@ class DelayedActionPolicy(ABC):
 
         Workflow:
           1) compute_target() -> desired worker IDs
-          2) propose a bijection between env.active_set and target (via random_bijection)
+          2) propose a bijection between env.active_set and target (via self.bijection)
           3) greedily keep a maximal feasible subset under env.validate_replacements
         """
         target = self.compute_target()
@@ -90,7 +94,7 @@ class DelayedActionPolicy(ABC):
 
         # Initial proposal: may fail if sizes mismatch or other constraints exist.
         try:
-            proposed: List[Tuple[int, int]] = random_bijection(active, target_set)
+            proposed: List[Tuple[int, int]] = self.bijection(active, target_set)
         except (ValueError, TypeError):
             return []
 
@@ -136,6 +140,7 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         k: int,
         m: int,
         epsilon: float = 0.1,
+        bijection_name: str = 'random',
         *,
         schedule: str = "inverse_sqrt",
         epsilon_min: float = 0.01,
@@ -145,7 +150,7 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         c: float = 0.0,
         omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
 
         if not (0.0 <= epsilon <= 1.0):
             raise ValueError("epsilon must be in [0,1].")
@@ -236,12 +241,13 @@ class VanillaUCBHiringPolicy(DelayedActionPolicy):
         k: int,
         m: int,
         alpha: float = 2.0,
+        bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         # keep compatibility with DelayedActionPolicy signature if needed:
         c: float = 0.0,
         omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
 
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
@@ -323,6 +329,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
         *,
         k: int,
         m: int,
+        bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         delta: Optional[float] = None,
         ucb_coef: float = 2.0,
@@ -331,7 +338,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
         c: float = 0.0,
         omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
 
         if ucb_coef <= 0:
             raise ValueError("ucb_coef must be > 0.")
@@ -437,7 +444,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
             if desired is None:
                 self.phase = "decide"
             else:
-                reps = random_bijection(active_now, sorted(desired))
+                reps = self.bijection(active_now, sorted(desired))
                 self.current_target = set(desired)
                 self.phase = "transition"
                 self.block_remaining = 1  # warmup plays exactly one period once active
@@ -445,7 +452,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
 
         if self.phase == "decide":
             desired = self._choose_set_at_comparison_instant()
-            reps = random_bijection(active_now, sorted(desired))
+            reps = self.bijection(active_now, sorted(desired))
             self.current_target = set(desired)
 
             self.phase = "transition"
