@@ -63,13 +63,16 @@ def make_policy(
 
     # Adaptive batching algorithm from the paper
     elif name in {"hiring-ucb", "hiring ucb", "paper", "algorithm-1"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=gamma, rng=rng)
+        return HiringUCBPolicy(k=k, m=m, gamma=gamma, horizon=T, rng=rng)
     
     elif name in {"hiring-ucb-gamma-1"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max)**2 * m, rng=rng)
+        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
     
     elif name in {"hiring-ucb-gamma-2"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max) * m, rng=rng)
+        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max) * m, horizon=T, rng=rng)
+    
+    elif name in {"hiring-ucb-gamma-3"}:
+        return HiringUCBPolicy(k=k, m=m, gamma=c * m, horizon=T, rng=rng)
     
     # Paper by Agrawal, Hedge, and Teneketzis 
     elif name in {"agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"}:
@@ -397,7 +400,7 @@ def run_c_sweep(
 
     plt.xlabel("t")
     plt.ylabel("Cumulative regret")
-    plt.ylim(0,2500)
+    plt.ylim(0,3500)
     plt.title(rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$")
     plt.grid(True, which="both", linestyle="--", alpha=0.5)
     plt.legend()

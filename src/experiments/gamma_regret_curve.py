@@ -8,12 +8,12 @@ from simulation import simulate
 # ---------------------------------------
 k = 10
 m = 3
-T = 10000
+T = 20000
 
-means = np.linspace(0.9, 0.5, k).tolist()
+means = np.linspace(0.3, 0.7, k).tolist()
 
-c = 10
-omega_max = 3
+c = 5
+omega_max = 5
 
 # Theoretical choices
 gamma_theoretical_1 = (c + omega_max) ** 2 * m      # theoretical choice #1 
@@ -27,7 +27,7 @@ base_gammas = np.linspace(gamma_min, gamma_max, num=25).tolist()
 # Combine linspace with the two theoretical values, then sort & deduplicate
 gammas = sorted(set([1,2,3,5,10,15] + base_gammas + [gamma_theoretical_1, gamma_theoretical_2]))
 
-n_runs = 20
+n_runs = 30
 base_seed = 12345
 
 # ---------------------------------------
@@ -128,7 +128,7 @@ if idx_add is not None:
 plt.xlabel(r"$\gamma$")
 plt.ylabel(rf"Total cumulative regret at $T = {T}$")
 plt.title(
-    r"Hiring-UCB: final cumulative regret vs $\gamma$" + "\n" +
+    r"Final cumulative regret vs $\gamma$" + "\n" +
     rf"($k={k}$, $m={m}$, $c={c}$, $\omega_\max={omega_max}$, ${n_runs}$ runs per $\gamma$)"
 )
 

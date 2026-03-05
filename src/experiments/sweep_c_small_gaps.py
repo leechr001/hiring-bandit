@@ -5,12 +5,23 @@ from simulation import run_c_sweep
 # Problem setup
 k = 10
 m = 3
-T = 1000
+T = 20000
 
-means = np.linspace(0.1, 0.9, k).tolist()
+means = np.linspace(0.45, 0.5, k).tolist()
 
-omega_max = 3
+omega_max = 5
 c_values = [1,5, 10, 15, 30]
+
+run_c_sweep(
+    k=k,
+    m=m,
+    T=T,
+    policy_name='hiring-ucb-gamma-1',
+    means=means,
+    c_values=c_values,
+    omega_max=omega_max,
+    n_runs=20,
+)
 
 run_c_sweep(
     k=k,

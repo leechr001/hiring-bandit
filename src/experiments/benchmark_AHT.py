@@ -1,6 +1,7 @@
 from simulation import run_policy_comparisons
 
 import random
+import numpy as np
 
 policies = [
     "hiring-ucb-gamma-1", 
@@ -16,12 +17,12 @@ labels = [
 
 k = 10
 m = 3
-T = 1000
-c = 10
-omega_max = 3
+T = 20000
+c = 5
+omega_max = 5
 
 rng = random.Random(123)
-means = sorted([rng.uniform(0.1, 0.9) for _ in range(k)], reverse=True)
+means = np.linspace(0.3, 0.7, k).tolist()
 
 run_policy_comparisons(
     policies=policies,

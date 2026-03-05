@@ -139,7 +139,7 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         self,
         k: int,
         m: int,
-        epsilon: float = 0.1,
+        epsilon: float = 0.25,
         bijection_name: str = 'random',
         *,
         schedule: str = "inverse_sqrt",

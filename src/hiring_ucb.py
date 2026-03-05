@@ -12,6 +12,7 @@ class HiringUCBConfig:
     k: int
     m: int
     gamma: float
+    horizon: Optional[int] = None
     # UCB confidence term uses log(k*m*t) per paper text
     # and UCB_i(0) = +inf initialization.
     # We keep it as bounded-reward Hoeffding-style index.
@@ -43,13 +44,23 @@ class HiringUCBPolicy(DelayedActionPolicy):
     The policy is anytime (does not require horizon T).
     """
 
-    def __init__(self, *, k: int, m: int, gamma: float, rng: Optional[random.Random] = None):
+    def __init__(
+        self,
+        *,
+        k: int,
+        m: int,
+        gamma: float,
+        horizon: Optional[int] = None,
+        rng: Optional[random.Random] = None,
+    ):
         if not (1 <= m < k):
             raise ValueError("Require 1 <= m < k.")
         if gamma <= 0:
             raise ValueError("gamma must be > 0.")
+        if horizon is not None and horizon <= 0:
+            raise ValueError("horizon must be > 0 when provided.")
 
-        self.cfg = HiringUCBConfig(k=k, m=m, gamma=gamma)
+        self.cfg = HiringUCBConfig(k=k, m=m, gamma=gamma, horizon=horizon)
         self.rng = rng or random.Random()
 
         # Empirical stats from observed semi-bandit feedback used to construct index
@@ -216,10 +227,19 @@ class HiringUCBPolicy(DelayedActionPolicy):
         return max(1, int(math.ceil(min(vals))))
 
     def bijection(
-        self, current: Sequence[int], target: Sequence[int]
+        self,
+        current: Sequence[int],
+        target: Sequence[int],
+        *,
+        current_period: Optional[int] = None,
+        switching_cost: float = 0.0,
     ) -> List[Tuple[int, int]]:
         """
         Construct a rank-matching bijection based on LCB values.
+
+        If a finite horizon is configured, exclude any pair (i, j) for which
+        UCB(j) - LCB(i) < c * (T - t), where T is the horizon, t is the current
+        period, and c is the switching cost.
 
         Parameters
         ----------
@@ -247,6 +267,8 @@ class HiringUCBPolicy(DelayedActionPolicy):
         add = add[:n]
 
         lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
+        ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
+        ucb = self.ucb_values()
 
         def lcb_key(worker_id: int) -> Tuple[float, int]:
             # Sort by LCB descending, then by worker_id ascending for stable tie-break.
@@ -256,7 +278,19 @@ class HiringUCBPolicy(DelayedActionPolicy):
         remove.sort(key=lcb_key, reverse=True)
         add.sort(key=lcb_key, reverse=True)
 
-        return list(zip(remove, add))
+
+        pairs = list(zip(remove, add))
+
+        if self.cfg.horizon is None or current_period is None:
+            return pairs
+
+        threshold = float(switching_cost) / max(0, self.cfg.horizon - int(current_period))
+        admissible: List[Tuple[int, int]] = []
+        for i, j in pairs:
+            if float(ucb[j - 1]) - float(lcb[i - 1]) >= threshold:
+                admissible.append((i, j))
+
+        return admissible
 
     def _compute_i_min_and_baseline(self, target: Set[int]) -> Tuple[int, int]:
         """
@@ -317,7 +351,12 @@ class HiringUCBPolicy(DelayedActionPolicy):
             self.i_min_count_at_c = baseline
             self.buffer_threshold_N = N
 
-            reps = self.bijection(active_now, sorted(new_target))
+            reps = self.bijection(
+                active_now,
+                sorted(new_target),
+                current_period=env.t,
+                switching_cost=env.c,
+            )
 
             self.current_target = set(new_target)
             self.phase = "transition"
