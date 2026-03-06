@@ -13,10 +13,6 @@ class HiringUCBConfig:
     m: int
     gamma: float
     horizon: Optional[int] = None
-    # UCB confidence term uses log(k*m*t) per paper text
-    # and UCB_i(0) = +inf initialization.
-    # We keep it as bounded-reward Hoeffding-style index.
-    # You can adjust this constant if your paper version differs.
     ucb_coef: float = 2.0
 
 
@@ -32,7 +28,7 @@ class HiringUCBPolicy(DelayedActionPolicy):
         - "active_set": iterable of 1-indexed worker IDs
 
     Iteration structure:
-    - At the start of each iteration, compute a target workforce U_ell (top-m by UCB),
+    - At the start of each iteration, compute a target workforce U_ell (top-m by UCB, respecting cost constraint),
       compute a buffer threshold N(ell), and identify i_min in U_ell with minimal count
       at iteration start c_ell.
     - Initiate one-for-one replacements to move toward U_ell.
