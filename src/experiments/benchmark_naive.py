@@ -4,14 +4,14 @@ from simulation import ExperimentSeries, plot_regret_series
 
 
 series = [
-    ExperimentSeries(
-        policy_name="optimistic-hire-gamma-1",
-        label=r"Optimistic-Hire, $\gamma=(c+\omega_\max)^2 m$",
-    ),
-    ExperimentSeries(
-        policy_name="optimistic-hire-gamma-2",
-        label=r"Optimistic-Hire, $\gamma=(c+\omega_\max) m$",
-    ),
+    # ExperimentSeries(
+    #     policy_name="optimistic-hire-gamma-1",
+    #     label=r"Optimistic-Hire, $\gamma=(c+\omega_\max)^2 m$",
+    # ),
+    # ExperimentSeries(
+    #     policy_name="optimistic-hire-gamma-2",
+    #     label=r"Optimistic-Hire, $\gamma=(c+\omega_\max) m$",
+    # ),
     ExperimentSeries(
         policy_name="optimistic-hire-auto",
         label=r"Optimistic-Hire, $\gamma=$Numerical Minimum",

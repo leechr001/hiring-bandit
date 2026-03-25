@@ -372,6 +372,80 @@ class OMM(EmpiricalDelayedActionPolicy):
         top_idx = [i for _, i in perm_scores[: self.m]]
         return [i + 1 for i in top_idx]
 
+
+class Threshold(EmpiricalDelayedActionPolicy):
+    """
+    Threshold policy for delayed hiring.
+
+    The policy keeps the current workforce until one or more active workers with
+    observations have empirical mean below a fixed threshold. Those workers are
+    replaced by previously untried workers when available. Once every worker has
+    been tried at least once, the policy falls back to choosing the top-m workers
+    by empirical mean each period.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        threshold: float = 0.5,
+        bijection_name: str = 'random',
+        rng: Optional[random.Random] = None,
+        c: float = 0.0,
+        omega_max: int = 0,
+    ) -> None:
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        self.threshold = float(threshold)
+        self._active_snapshot: List[int] = []
+        self.reset()
+
+    def reset_policy_state(self) -> None:
+        self._active_snapshot = []
+
+    def act(self, env) -> List[Tuple[int, int]]:
+        self._active_snapshot = sorted(int(worker_id) for worker_id in env.active_set)
+        return super().act(env)
+
+    def _top_empirical_team(self) -> List[int]:
+        means = self.empirical_means()
+        perm = list(range(self.k))
+        self.rng.shuffle(perm)
+        perm_means = [(means[i], i) for i in perm]
+        perm_means.sort(key=lambda x: x[0], reverse=True)
+        top_idx = [i for _, i in perm_means[: self.m]]
+        return [i + 1 for i in top_idx]
+
+    def compute_target(self) -> List[int]:
+        active = list(self._active_snapshot)
+        if len(active) != self.m:
+            raise RuntimeError("Threshold.act() must be called with the current environment.")
+
+        untried = [
+            worker_id
+            for worker_id in range(1, self.k + 1)
+            if self.counts[worker_id - 1] == 0 and worker_id not in active
+        ]
+
+        if not untried:
+            return self._top_empirical_team()
+
+        means = self.empirical_means()
+        below_threshold = [
+            worker_id
+            for worker_id in active
+            if self.counts[worker_id - 1] > 0 and means[worker_id - 1] < self.threshold
+        ]
+        if not below_threshold:
+            return active
+
+        self.rng.shuffle(untried)
+        target = set(active)
+        for remove_id, add_id in zip(below_threshold, untried):
+            target.discard(remove_id)
+            target.add(add_id)
+
+        return sorted(target)
+
 @dataclass(frozen=True)
 class AHTConfig:
     """

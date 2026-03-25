@@ -2,6 +2,7 @@ from bandit_environment import TemporaryHiringBanditEnv
 from policies import (
     EpsilonGreedyHiringPolicy,
     OMM,
+    Threshold,
     AgrawalHegdeTeneketzisPolicy
 )
 
@@ -134,6 +135,26 @@ def run_series_simulations(
     return means_out, collected
 
 
+def _average_regret_results(
+    means: Sequence[float],
+    m: int,
+    results: Mapping[str, Tuple[np.ndarray, np.ndarray]],
+) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    oracle_reward = float(sum(sorted((float(mu) for mu in means), reverse=True)[:m]))
+    if oracle_reward <= 0.0:
+        raise ValueError("mu(A*) must be positive to normalize regret by T * mu(A*).")
+
+    averaged: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for label, (mean_curve, std_curve) in results.items():
+        periods = np.arange(1, len(mean_curve) + 1, dtype=np.float64)
+        denom = periods * oracle_reward
+        averaged[label] = (
+            np.asarray(mean_curve, dtype=np.float64) / denom,
+            np.asarray(std_curve, dtype=np.float64) / denom,
+        )
+    return averaged
+
+
 def plot_regret_series(
     *,
     series: Sequence[ExperimentSeries],
@@ -183,6 +204,42 @@ def plot_regret_series(
     plt.show()
 
     return means, results
+
+
+def plot_average_regret_series(
+    *,
+    series: Sequence[ExperimentSeries],
+    simulate_kwargs: Mapping[str, Any],
+    title: str = "Normalized Pseudo-Regret by Policy",
+    xlabel: str = "Time t",
+    ylabel: str = r"Normalized pseudo-regret $R(t) / (t\,\mu(A^*))$",
+    figure_kwargs: Optional[Mapping[str, Any]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    grid_kwargs: Optional[Mapping[str, Any]] = None,
+    precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
+) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
+    if precomputed is None:
+        means, results = run_series_simulations(series=series, simulate_kwargs=simulate_kwargs)
+    else:
+        means, results = precomputed
+
+    averaged_results = _average_regret_results(
+        means,
+        int(simulate_kwargs["m"]),
+        results,
+    )
+    plot_regret_series(
+        series=series,
+        simulate_kwargs=simulate_kwargs,
+        title=title,
+        xlabel=xlabel,
+        ylabel=ylabel,
+        figure_kwargs=figure_kwargs,
+        ylim=ylim,
+        grid_kwargs=grid_kwargs,
+        precomputed=(means, averaged_results),
+    )
+    return means, averaged_results
 
 
 def evaluate_final_regret_sweep(
@@ -445,6 +502,7 @@ def make_policy(
     omega_max: int,
     rng: random.Random,
     epsilon: float = 0.1,
+    threshold: float = 0.5,
     ucb_coef: float = 2.0,
     gamma: float | str = 0.5,
 ):
@@ -453,6 +511,7 @@ def make_policy(
 
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
+      - "threshold"
       - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
       - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
@@ -462,6 +521,9 @@ def make_policy(
     # Naive baselines
     if name in {"eps", "epsilon", "epsilon-greedy", "egreedy"}:
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
+
+    elif name in {"threshold"}:
+        return Threshold(k=k, m=m, threshold=threshold, rng=rng)
 
     elif name in {
         "omm",
@@ -520,6 +582,7 @@ def run_episode(
     delay_sampler: Callable,
     T: int,
     epsilon: float,
+    threshold: float,
     gamma: float | str,
     c: float,
     omega_max: int,
@@ -550,6 +613,7 @@ def run_episode(
         omega_max=omega_max,
         rng=rng,
         epsilon=epsilon,
+        threshold=threshold,
         ucb_coef=2.0,  # adjust if you want different default exploration strength
         gamma=gamma
     )
@@ -588,6 +652,7 @@ def simulate(
     reward_sampler_factory: Optional[Callable[[int], Sequence[Callable]]] = None,
     delay_sampler_factory: Optional[Callable[[int], Callable]] = None,
     epsilon: float = 0.1,
+    threshold: float = 0.5,
     gamma: float | str = 0.5,
     c: float = 1,
     omega_max: int = 3,
@@ -645,6 +710,7 @@ def simulate(
                     delay_sampler=episode_delay_sampler,
                     T=T,
                     epsilon=epsilon,
+                    threshold=threshold,
                     gamma=gamma,
                     c=c,
                     omega_max=omega_max,

@@ -19,9 +19,10 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
 from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
-from policies import AgrawalHegdeTeneketzisPolicy
+from policies import AgrawalHegdeTeneketzisPolicy, Threshold
 from samplers import make_calendar_adversarial_delay, make_calendar_delay_sampler
 from simulation import (
+    _average_regret_results,
     make_delay_sampler_factory,
     compute_optimistic_hire_auto_gamma,
     make_policy,
@@ -31,6 +32,23 @@ from simulation import (
 
 
 class RegressionTests(unittest.TestCase):
+    class _StaticEnv:
+        def __init__(self, active_set):
+            self.active_set = set(active_set)
+
+        def validate_replacements(self, replacements) -> None:
+            seen_remove = set()
+            seen_add = set()
+            for remove_id, add_id in replacements:
+                if remove_id not in self.active_set:
+                    raise ValueError("remove worker must be active")
+                if add_id in self.active_set:
+                    raise ValueError("add worker must be inactive")
+                if remove_id in seen_remove or add_id in seen_add:
+                    raise ValueError("duplicate worker in replacements")
+                seen_remove.add(remove_id)
+                seen_add.add(add_id)
+
     def test_simulate_results_do_not_depend_on_policy_order(self) -> None:
         kwargs = {
             "k": 5,
@@ -149,6 +167,8 @@ class RegressionTests(unittest.TestCase):
             gamma="auto",
             **kwargs,
         )
+        self.assertIsInstance(policy, HiringUCBPolicy)
+        assert isinstance(policy, HiringUCBPolicy)
 
         self.assertGreater(policy.cfg.gamma, 0.0)
         self.assertAlmostEqual(policy.cfg.gamma, expected_gamma)
@@ -219,6 +239,55 @@ class RegressionTests(unittest.TestCase):
         sampler = factory(11)
         self.assertEqual(sampler((1, 2), 5), 3)
         self.assertEqual(sampler((2, 3), 5), 19)
+
+    def test_average_regret_results_divides_by_time_and_oracle_reward(self) -> None:
+        averaged = _average_regret_results(
+            [0.9, 0.8, 0.1],
+            2,
+            {
+                "OMM": (
+                    np.asarray([2.0, 6.0, 12.0], dtype=np.float64),
+                    np.asarray([1.0, 3.0, 6.0], dtype=np.float64),
+                )
+            }
+        )
+
+        mean_curve, std_curve = averaged["OMM"]
+        np.testing.assert_allclose(
+            mean_curve,
+            np.asarray([2.0, 3.0, 4.0]) / 1.7,
+        )
+        np.testing.assert_allclose(
+            std_curve,
+            np.asarray([1.0, 1.5, 2.0]) / 1.7,
+        )
+
+    def test_threshold_policy_replaces_below_threshold_worker_with_untried_worker(self) -> None:
+        policy = Threshold(k=4, m=2, threshold=0.5, rng=random.Random(0))
+        policy.counts[:] = np.asarray([5, 5, 0, 4], dtype=np.int64)
+        policy.sums[:] = np.asarray([2.0, 4.0, 0.0, 3.2], dtype=np.float64)
+
+        replacements = policy.act(self._StaticEnv({1, 2}))
+
+        self.assertEqual(replacements, [(1, 3)])
+
+    def test_threshold_policy_falls_back_to_top_empirical_team_after_all_workers_tried(self) -> None:
+        policy = make_policy(
+            "threshold",
+            k=4,
+            m=2,
+            T=10,
+            c=0.0,
+            omega_max=1,
+            rng=random.Random(0),
+            threshold=0.5,
+        )
+        policy.counts[:] = np.asarray([5, 5, 4, 4], dtype=np.int64)
+        policy.sums[:] = np.asarray([2.0, 4.0, 3.6, 2.4], dtype=np.float64)
+
+        replacements = policy.act(self._StaticEnv({1, 2}))
+
+        self.assertEqual(replacements, [(1, 3)])
 
 
 if __name__ == "__main__":
