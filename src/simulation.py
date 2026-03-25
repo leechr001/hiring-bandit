@@ -23,6 +23,10 @@ import matplotlib.pyplot as plt
 # Simulation and regret
 # ----------------------------
 
+def _seeded_rng(seed: int, stream: str) -> random.Random:
+    """Create an independent deterministic RNG stream for one episode component."""
+    return random.Random(f"{seed}:{stream}")
+
 def make_policy(
     policy_name: str,
     *,
@@ -132,11 +136,8 @@ def run_episode(
     regret_increments = np.zeros(T, dtype=np.float64)
 
     for _ in range(T):
-        try:
-            replacements = policy.act(env)
-            env.validate_replacements(replacements)
-        except Exception:
-            replacements = []
+        replacements = policy.act(env)
+        env.validate_replacements(replacements)
 
         obs, total_reward, cost, info = env.step(replacements)
 
@@ -159,6 +160,8 @@ def simulate(
     means: Optional[Sequence[float]] = None,
     reward_samplers: Optional[Sequence[Callable]] = None,
     delay_sampler: Optional[Callable] = None,
+    reward_sampler_factory: Optional[Callable[[int], Sequence[Callable]]] = None,
+    delay_sampler_factory: Optional[Callable[[int], Callable]] = None,
     epsilon: float = 0.1,
     gamma: float = 0.5,
     c: float = 1,
@@ -169,34 +172,58 @@ def simulate(
     # Simple mean profile with a clear top-m
     rng = random.Random(999)
 
+    if reward_samplers is not None and reward_sampler_factory is not None:
+        raise ValueError("Pass either reward_samplers or reward_sampler_factory, not both.")
+    if delay_sampler is not None and delay_sampler_factory is not None:
+        raise ValueError("Pass either delay_sampler or delay_sampler_factory, not both.")
+
     if means is None:
         means = sorted([rng.uniform(0.1, 0.9) for _ in range(k)], reverse=True)
     
-    if reward_samplers is None:
-        reward_samplers = make_bernoulli_samplers(means, rng)
+    if reward_samplers is None and reward_sampler_factory is None:
+        reward_sampler_factory = lambda seed: make_bernoulli_samplers(
+            means,
+            _seeded_rng(seed, "reward"),
+        )
     
-    if delay_sampler is None:
-        delay_sampler = make_uniform_delay_sampler(omega_max, rng)
+    if delay_sampler is None and delay_sampler_factory is None:
+        delay_sampler_factory = lambda seed: make_uniform_delay_sampler(
+            omega_max,
+            _seeded_rng(seed, "delay"),
+        )
 
     results: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
     for pname in policies:
         curves = []
         for r in range(n_runs):
+            episode_seed = seed0 + r
+            episode_reward_samplers = reward_samplers
+            if episode_reward_samplers is None:
+                if reward_sampler_factory is None:
+                    raise ValueError("reward_sampler_factory must be set when reward_samplers is None.")
+                episode_reward_samplers = reward_sampler_factory(episode_seed)
+
+            episode_delay_sampler = delay_sampler
+            if episode_delay_sampler is None:
+                if delay_sampler_factory is None:
+                    raise ValueError("delay_sampler_factory must be set when delay_sampler is None.")
+                episode_delay_sampler = delay_sampler_factory(episode_seed)
+
             curves.append(
                 run_episode(
                     policy_name=pname,
                     k=k,
                     m=m,
                     means=means,
-                    reward_samplers=reward_samplers,
-                    delay_sampler=delay_sampler,
+                    reward_samplers=episode_reward_samplers,
+                    delay_sampler=episode_delay_sampler,
                     T=T,
                     epsilon=epsilon,
                     gamma=gamma,
                     c=c,
                     omega_max=omega_max,
-                    seed=seed0 + r,
+                    seed=episode_seed,
                 )
             )
         curves = np.stack(curves, axis=0)
@@ -230,9 +257,20 @@ def run_policy_comparisons(
         labels = policies
 
     if delay_process_name in {'uniform', 'random', 'stochastic', 'iid'}:
-        sampler = make_uniform_delay_sampler(omega_max)
+        delay_sampler_factory = lambda seed: make_uniform_delay_sampler(
+            omega_max,
+            _seeded_rng(seed, "delay"),
+        )
     elif delay_process_name in {'adversarial', 'wc'}:
-        sampler = make_adversarial_delay(means=means, omega_max=omega_max)
+        delay_sampler_factory = lambda seed: make_adversarial_delay(
+            means=means,
+            omega_max=omega_max,
+        )
+    else:
+        raise ValueError(
+            "delay_process_name must be one of: 'uniform', 'random', "
+            "'stochastic', 'iid', 'adversarial', or 'wc'."
+        )
 
     # --- Run simulation ---
     means, results = simulate(
@@ -241,7 +279,7 @@ def run_policy_comparisons(
         m=m,
         T=T,
         means=means,
-        delay_sampler=sampler,
+        delay_sampler_factory=delay_sampler_factory,
         c=c,
         omega_max=omega_max,
         n_runs=n_runs,

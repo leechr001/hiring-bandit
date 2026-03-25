@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Sequence, Callable
+from typing import List, Tuple, Sequence, Callable, Optional
 
 import random
 
@@ -19,7 +19,9 @@ def make_bijection(bijection_name:str) -> Callable:
 
 def random_bijection(
     current: Sequence[int],
-    target: Sequence[int]
+    target: Sequence[int],
+    *,
+    rng: Optional[random.Random] = None,
 ) -> List[Tuple[int, int]]:
     """
     Construct a random bijection, needed to adapt policies
@@ -31,12 +33,17 @@ def random_bijection(
     if len(remove) != len(add):
         raise ValueError("current and target must differ by equal counts.")
     
-    random.shuffle(add)
+    if rng is None:
+        random.shuffle(add)
+    else:
+        rng.shuffle(add)
     return list(zip(remove, add))
 
 def oracle_rank_matching_bijection(
     current: Sequence[int],
-    target: Sequence[int]
+    target: Sequence[int],
+    *,
+    rng: Optional[random.Random] = None,
 ) -> List[Tuple[int, int]]:
     """
     Construct a rank matching objective based on true means
@@ -56,7 +63,9 @@ def oracle_rank_matching_bijection(
 
 def oracle_rank_mismatching_bijection(
     current: Sequence[int],
-    target: Sequence[int]
+    target: Sequence[int],
+    *,
+    rng: Optional[random.Random] = None,
 ) -> List[Tuple[int, int]]:
     """
     Construct a rank matching objective based on true means

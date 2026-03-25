@@ -105,12 +105,17 @@ class HiringUCBPolicy(DelayedActionPolicy):
             Mapping from 1-indexed worker ID to observed reward for workers that were active
             and produced feedback this period.
         """
+        observed_active = {int(worker_id) for worker_id in individual_rewards}
         for worker_id, r in individual_rewards.items():
             idx = worker_id - 1
             self.counts[idx] += 1
             self.sums[idx] += float(r)
 
         self.t += 1
+
+        # Count the first target-active reward period as part of the buffer.
+        if self.phase == "transition" and observed_active == self.current_target:
+            self.phase = "buffer"
 
         if self.phase == "buffer":
             # End the buffer phase once i_min has accrued N(ell) additional observations since c_ell.
@@ -234,7 +239,7 @@ class HiringUCBPolicy(DelayedActionPolicy):
         Construct a rank-matching bijection based on LCB values.
 
         If a finite horizon is configured, exclude any pair (i, j) for which
-        UCB(j) - LCB(i) < c * (T - t), where T is the horizon, t is the current
+        UCB(j) - LCB(i) < c / (T - t), where T is the horizon, t is the current
         period, and c is the switching cost.
 
         Parameters
@@ -264,7 +269,6 @@ class HiringUCBPolicy(DelayedActionPolicy):
 
         lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
-        ucb = self.ucb_values()
 
         def lcb_key(worker_id: int) -> Tuple[float, int]:
             # Sort by LCB descending, then by worker_id ascending for stable tie-break.
@@ -280,7 +284,11 @@ class HiringUCBPolicy(DelayedActionPolicy):
         if self.cfg.horizon is None or current_period is None:
             return pairs
 
-        threshold = float(switching_cost) / max(0, self.cfg.horizon - int(current_period))
+        remaining_periods = int(self.cfg.horizon) - int(current_period)
+        if remaining_periods <= 0:
+            return []
+
+        threshold = float(switching_cost) / float(remaining_periods)
         admissible: List[Tuple[int, int]] = []
         for i, j in pairs:
             if float(ucb[j - 1]) - float(lcb[i - 1]) >= threshold:

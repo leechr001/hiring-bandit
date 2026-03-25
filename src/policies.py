@@ -87,16 +87,14 @@ class DelayedActionPolicy(ABC):
         # Normalize target: unique, sorted, valid IDs.
         # (If a subclass returns duplicates, we clean it up here.)
         target_set = sorted(set(int(x) for x in target))
-        if len(target_set) == 0:
-            return []
+        if len(target_set) != self.m:
+            raise ValueError(
+                f"compute_target() must return exactly {self.m} distinct worker IDs."
+            )
 
         active = sorted(env.active_set)
 
-        # Initial proposal: may fail if sizes mismatch or other constraints exist.
-        try:
-            proposed: List[Tuple[int, int]] = self.bijection(active, target_set)
-        except (ValueError, TypeError):
-            return []
+        proposed: List[Tuple[int, int]] = self.bijection(active, target_set, rng=self.rng)
 
         # Greedily keep only the subset that remains valid.
         feasible: List[Tuple[int, int]] = []
@@ -104,9 +102,7 @@ class DelayedActionPolicy(ABC):
             candidate = feasible + [pair]
             try:
                 env.validate_replacements(candidate)
-            except Exception:
-                # If you have a specific exception type for invalid replacements,
-                # replace `Exception` with that to avoid masking unrelated bugs.
+            except ValueError:
                 continue
             feasible.append(pair)
 
@@ -403,6 +399,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
         self._warmup_queue = []
 
     def update(self, individual_rewards: Dict[int, float]) -> None:
+        observed_active = {int(worker_id) for worker_id in individual_rewards}
         for worker_id, r in individual_rewards.items():
             idx = int(worker_id) - 1
             if 0 <= idx < self.k:
@@ -410,6 +407,10 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
                 self.sums[idx] += float(r)
 
         self.t += 1
+
+        # Count the first target-active reward period as part of the block.
+        if self.phase == "transition" and observed_active == self.current_target:
+            self.phase = "block"
 
         if self.phase == "block":
             self.block_remaining -= 1
@@ -444,7 +445,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
             if desired is None:
                 self.phase = "decide"
             else:
-                reps = self.bijection(active_now, sorted(desired))
+                reps = self.bijection(active_now, sorted(desired), rng=self.rng)
                 self.current_target = set(desired)
                 self.phase = "transition"
                 self.block_remaining = 1  # warmup plays exactly one period once active
@@ -452,7 +453,7 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
 
         if self.phase == "decide":
             desired = self._choose_set_at_comparison_instant()
-            reps = self.bijection(active_now, sorted(desired))
+            reps = self.bijection(active_now, sorted(desired), rng=self.rng)
             self.current_target = set(desired)
 
             self.phase = "transition"
