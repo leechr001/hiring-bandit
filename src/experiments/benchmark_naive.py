@@ -16,7 +16,7 @@ series = [
         policy_name="optimistic-hire-auto",
         label=r"Optimistic-Hire, $\gamma=$Numerical Minimum",
     ),
-    ExperimentSeries(policy_name="UCB", label="UCB"),
+    ExperimentSeries(policy_name="OMM", label="OMM"),
     ExperimentSeries(policy_name="Epsilon-Greedy", label=r"$\epsilon$-Greedy"),
 ]
 

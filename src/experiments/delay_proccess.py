@@ -4,9 +4,9 @@ from simulation import ExperimentSeries, make_delay_sampler_factory, plot_regret
 
 
 series = [
-    ExperimentSeries(policy_name="ucb-rm", label="UCB with rank-matching bijection"),
-    ExperimentSeries(policy_name="ucb", label="UCB with random bijection"),
-    ExperimentSeries(policy_name="ucb-rmm", label="UCB with rank-mismatching bijection"),
+    ExperimentSeries(policy_name="omm-rm", label="OMM with rank-matching bijection"),
+    ExperimentSeries(policy_name="omm", label="OMM with random bijection"),
+    ExperimentSeries(policy_name="omm-rmm", label="OMM with rank-mismatching bijection"),
 ]
 
 k = 20
@@ -36,5 +36,5 @@ for delay_process_name in ["stochastic", "adversarial"]:
             ),
             "n_runs": n_runs,
         },
-        title=f"Comparison of regret for UCB with different bijections and {delay_process_name} delays.",
+        title=f"Comparison of regret for OMM with different bijections and {delay_process_name} delays.",
     )

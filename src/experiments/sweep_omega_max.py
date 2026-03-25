@@ -19,7 +19,7 @@ run_omega_sweep(
     k=k,
     m=m,
     T=T,
-    policy_name='ucb',
+    policy_name='omm',
     means=means,
     c=c,
     omega_max_values=omega_max_values,
@@ -32,7 +32,7 @@ run_omega_sweep(
     k=k,
     m=m,
     T=T,
-    policy_name='ucb',
+    policy_name='omm',
     means=means,
     c=c,
     omega_max_values=omega_max_values,
@@ -40,4 +40,3 @@ run_omega_sweep(
     n_runs=20,
     y_up_lim=y_up_lim
 )
-

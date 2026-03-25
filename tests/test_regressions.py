@@ -3,6 +3,7 @@ import random
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
 from policies import AgrawalHegdeTeneketzisPolicy
+from samplers import make_calendar_adversarial_delay, make_calendar_delay_sampler
 from simulation import (
+    make_delay_sampler_factory,
     compute_optimistic_hire_auto_gamma,
     make_policy,
     optimistic_hire_regret_bound,
@@ -41,16 +44,16 @@ class RegressionTests(unittest.TestCase):
         }
 
         _, results_ab = simulate(
-            policies=["ucb", "epsilon-greedy"],
+            policies=["omm", "epsilon-greedy"],
             **kwargs,
         )
         _, results_ba = simulate(
-            policies=["epsilon-greedy", "ucb"],
+            policies=["epsilon-greedy", "omm"],
             **kwargs,
         )
 
-        np.testing.assert_allclose(results_ab["ucb"][0], results_ba["ucb"][0])
-        np.testing.assert_allclose(results_ab["ucb"][1], results_ba["ucb"][1])
+        np.testing.assert_allclose(results_ab["omm"][0], results_ba["omm"][0])
+        np.testing.assert_allclose(results_ab["omm"][1], results_ba["omm"][1])
         np.testing.assert_allclose(
             results_ab["epsilon-greedy"][0],
             results_ba["epsilon-greedy"][0],
@@ -156,6 +159,66 @@ class RegressionTests(unittest.TestCase):
 
         self.assertLessEqual(base_bound, lower_bound)
         self.assertLessEqual(base_bound, upper_bound)
+
+    def test_calendar_delay_sampler_only_returns_calendar_aligned_delays(self) -> None:
+        sampler = make_calendar_delay_sampler(
+            20,
+            frequency=8,
+            distribution="unif",
+            rng=random.Random(0),
+        )
+
+        observed = {sampler((1, 2), 5) for _ in range(200)}
+        self.assertEqual(observed, {3, 11, 19})
+
+        factory = make_delay_sampler_factory(
+            "calendar",
+            means=[0.8, 0.2],
+            omega_max=20,
+            calendar_frequency=8,
+            calendar_distribution="unif",
+        )
+        factory_sampler = factory(7)
+        for _ in range(50):
+            delay = factory_sampler((1, 2), 8)
+            self.assertIn(delay, {8, 16})
+
+    def test_calendar_delay_sampler_geom_prefers_earlier_feasible_periods(self) -> None:
+        sampler = make_calendar_delay_sampler(
+            20,
+            frequency=8,
+            distribution="geom",
+            geom_p=0.5,
+            rng=random.Random(0),
+        )
+
+        counts = Counter(sampler((1, 2), 5) for _ in range(2000))
+
+        self.assertGreater(counts[3], counts[11])
+        self.assertGreater(counts[11], counts[19])
+
+    def test_calendar_adversarial_delay_uses_calendar_extremes(self) -> None:
+        sampler = make_calendar_adversarial_delay(
+            means=[0.8, 0.2, 0.95],
+            omega_max=20,
+            frequency=8,
+        )
+
+        self.assertEqual(sampler((1, 2), 5), 3)
+        self.assertEqual(sampler((2, 3), 5), 19)
+        self.assertEqual(sampler((2, 3), 8), 16)
+
+    def test_calendar_adversarial_delay_factory_builds_sampler(self) -> None:
+        factory = make_delay_sampler_factory(
+            "calendar-adversarial",
+            means=[0.8, 0.2, 0.95],
+            omega_max=20,
+            calendar_frequency=8,
+        )
+
+        sampler = factory(11)
+        self.assertEqual(sampler((1, 2), 5), 3)
+        self.assertEqual(sampler((2, 3), 5), 19)
 
 
 if __name__ == "__main__":

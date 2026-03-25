@@ -304,21 +304,21 @@ class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
         return [i + 1 for i in top_idx]
 
 
-class VanillaUCBHiringPolicy(EmpiricalDelayedActionPolicy):
+class OMM(EmpiricalDelayedActionPolicy):
     """
-    Vanilla UCB for m-of-k semi-bandits.
+    OMM (Optimistic Matroid Maximization) specialized to m-of-k semi-bandits.
 
-    Each period:
-      - Compute UCB_i(t) = mean_i + sqrt(alpha * log(t) / n_i)
+    Following Algorithm 2 of Kveton et al. (2014), this baseline:
+      - Computes U_i(t) = mean_i + sqrt(alpha * log(t) / n_i)
       - If n_i == 0, set UCB_i = +inf (forces initial exploration)
-      - Choose top-m by UCB.
+      - Chooses the top-m workers greedily by those optimistic scores.
 
     Parameters
     ----------
     k : int
     m : int
     alpha : float
-        Exploration strength. alpha=2 is a common safe default.
+        Exploration strength. The paper uses alpha=2, yielding sqrt(2 log t / n_i).
     rng : random.Random, optional
         Used only for tie-breaking.
     """
@@ -371,7 +371,6 @@ class VanillaUCBHiringPolicy(EmpiricalDelayedActionPolicy):
 
         top_idx = [i for _, i in perm_scores[: self.m]]
         return [i + 1 for i in top_idx]
-
 
 @dataclass(frozen=True)
 class AHTConfig:

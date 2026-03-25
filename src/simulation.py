@@ -1,13 +1,15 @@
 from bandit_environment import TemporaryHiringBanditEnv
 from policies import (
     EpsilonGreedyHiringPolicy,
-    VanillaUCBHiringPolicy,
+    OMM,
     AgrawalHegdeTeneketzisPolicy
 )
 
 from hiring_ucb import HiringUCBPolicy
 from samplers import (
     make_bernoulli_samplers, 
+    make_calendar_adversarial_delay,
+    make_calendar_delay_sampler,
     make_uniform_delay_sampler, 
     make_adversarial_delay
 )
@@ -61,6 +63,9 @@ def make_delay_sampler_factory(
     *,
     means: Sequence[float],
     omega_max: int,
+    calendar_frequency: Optional[int] = None,
+    calendar_distribution: str = "geom",
+    calendar_geom_p: float = 0.5,
 ) -> Callable[[int], Callable]:
     if delay_process_name in {"uniform", "random", "stochastic", "iid"}:
         return lambda seed: make_uniform_delay_sampler(
@@ -72,10 +77,38 @@ def make_delay_sampler_factory(
             means=means,
             omega_max=omega_max,
         )
+    if delay_process_name in {"calendar-adversarial", "calendar-wc"}:
+        if calendar_frequency is None:
+            raise ValueError("calendar_frequency is required for calendar delays.")
+
+        return lambda seed: make_calendar_adversarial_delay(
+            means=means,
+            omega_max=omega_max,
+            frequency=calendar_frequency,
+        )
+    if delay_process_name in {"calendar", "calendar-unif", "calendar-geom"}:
+        if calendar_frequency is None:
+            raise ValueError("calendar_frequency is required for calendar delays.")
+
+        distribution = calendar_distribution
+        if delay_process_name == "calendar-unif":
+            distribution = "unif"
+        elif delay_process_name == "calendar-geom":
+            distribution = "geom"
+
+        return lambda seed: make_calendar_delay_sampler(
+            omega_max,
+            frequency=calendar_frequency,
+            distribution=distribution,
+            geom_p=calendar_geom_p,
+            rng=_seeded_rng(seed, "delay"),
+        )
 
     raise ValueError(
         "delay_process_name must be one of: 'uniform', 'random', "
-        "'stochastic', 'iid', 'adversarial', or 'wc'."
+        "'stochastic', 'iid', 'adversarial', 'wc', 'calendar', "
+        "'calendar-unif', 'calendar-geom', 'calendar-adversarial', "
+        "or 'calendar-wc'."
     )
 
 
@@ -420,7 +453,7 @@ def make_policy(
 
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
-      - "ucb", "vanilla-ucb", "vanilla ucb"
+      - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
       - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
     """
@@ -430,15 +463,19 @@ def make_policy(
     if name in {"eps", "epsilon", "epsilon-greedy", "egreedy"}:
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
 
-    elif name in {"ucb", "vanilla-ucb", "vanilla ucb"}:
-        return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, rng=rng)
+    elif name in {
+        "omm",
+        "optimistic-matroid-maximization",
+        "optimistic matroid maximization",
+    }:
+        return OMM(k=k, m=m, alpha=ucb_coef, rng=rng)
     
-    # Construct UCB with different bijections for experiements
-    elif name in {"ucb-rm"}:
-        return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', rng=rng)
+    # Construct OMM with different bijections for experiments.
+    elif name in {"omm-rm"}:
+        return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', rng=rng)
     
-    elif name in {"ucb-rmm"}:
-        return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
+    elif name in {"omm-rmm"}:
+        return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
     # Adaptive batching algorithm from the paper
     elif name in {"optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"}:
@@ -635,6 +672,9 @@ def run_policy_comparisons(
     omega_max: int,
     means: Sequence[float],
     delay_process_name: str = 'uniform',
+    calendar_frequency: Optional[int] = None,
+    calendar_distribution: str = "geom",
+    calendar_geom_p: float = 0.5,
     labels: Optional[Sequence[str]] = None,
     n_runs: int = 20,
     base_seed: int = 12345,  
@@ -647,6 +687,9 @@ def run_policy_comparisons(
         delay_process_name,
         means=means,
         omega_max=omega_max,
+        calendar_frequency=calendar_frequency,
+        calendar_distribution=calendar_distribution,
+        calendar_geom_p=calendar_geom_p,
     )
 
     series = [
