@@ -19,7 +19,12 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
 from policies import AgrawalHegdeTeneketzisPolicy
-from simulation import simulate
+from simulation import (
+    compute_optimistic_hire_auto_gamma,
+    make_policy,
+    optimistic_hire_regret_bound,
+    simulate,
+)
 
 
 class RegressionTests(unittest.TestCase):
@@ -124,6 +129,33 @@ class RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(pairs, [])
+
+    def test_make_policy_resolves_auto_gamma_for_optimistic_hire(self) -> None:
+        kwargs = {
+            "k": 10,
+            "m": 3,
+            "T": 2000,
+            "c": 5.0,
+            "omega_max": 4,
+        }
+        expected_gamma = compute_optimistic_hire_auto_gamma(**kwargs)
+
+        policy = make_policy(
+            "optimistic-hire",
+            rng=random.Random(0),
+            gamma="auto",
+            **kwargs,
+        )
+
+        self.assertGreater(policy.cfg.gamma, 0.0)
+        self.assertAlmostEqual(policy.cfg.gamma, expected_gamma)
+
+        base_bound = optimistic_hire_regret_bound(policy.cfg.gamma, **kwargs)
+        lower_bound = optimistic_hire_regret_bound(policy.cfg.gamma * 0.8, **kwargs)
+        upper_bound = optimistic_hire_regret_bound(policy.cfg.gamma * 1.2, **kwargs)
+
+        self.assertLessEqual(base_bound, lower_bound)
+        self.assertLessEqual(base_bound, upper_bound)
 
 
 if __name__ == "__main__":

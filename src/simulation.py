@@ -12,8 +12,10 @@ from samplers import (
     make_adversarial_delay
 )
 
+from dataclasses import dataclass, field
+import math
 import random
-from typing import Sequence, Dict, Tuple, Callable, Optional
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,9 +25,382 @@ import matplotlib.pyplot as plt
 # Simulation and regret
 # ----------------------------
 
+
+@dataclass(frozen=True)
+class ExperimentSeries:
+    policy_name: str
+    label: Optional[str] = None
+    sim_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    plot_kwargs: Mapping[str, Any] = field(default_factory=dict)
+    band_alpha: float = 0.15
+
+
+@dataclass(frozen=True)
+class HighlightPoint:
+    value: float
+    label: str
+    plot_kwargs: Mapping[str, Any] = field(default_factory=dict)
+
 def _seeded_rng(seed: int, stream: str) -> random.Random:
     """Create an independent deterministic RNG stream for one episode component."""
     return random.Random(f"{seed}:{stream}")
+
+
+def _merge_sim_kwargs(
+    base_kwargs: Mapping[str, Any],
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged = dict(base_kwargs)
+    if overrides:
+        merged.update(dict(overrides))
+    return merged
+
+
+def make_delay_sampler_factory(
+    delay_process_name: str,
+    *,
+    means: Sequence[float],
+    omega_max: int,
+) -> Callable[[int], Callable]:
+    if delay_process_name in {"uniform", "random", "stochastic", "iid"}:
+        return lambda seed: make_uniform_delay_sampler(
+            omega_max,
+            _seeded_rng(seed, "delay"),
+        )
+    if delay_process_name in {"adversarial", "wc"}:
+        return lambda seed: make_adversarial_delay(
+            means=means,
+            omega_max=omega_max,
+        )
+
+    raise ValueError(
+        "delay_process_name must be one of: 'uniform', 'random', "
+        "'stochastic', 'iid', 'adversarial', or 'wc'."
+    )
+
+
+def run_series_simulations(
+    *,
+    series: Sequence[ExperimentSeries],
+    simulate_kwargs: Mapping[str, Any],
+) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
+    means_out: Optional[Sequence[float]] = None
+    collected: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+
+    for spec in series:
+        current_kwargs = _merge_sim_kwargs(simulate_kwargs, spec.sim_kwargs)
+        means_out, results = simulate(
+            policies=[spec.policy_name],
+            **current_kwargs,
+        )
+        collected[spec.label or spec.policy_name] = results[spec.policy_name]
+
+    if means_out is None:
+        raise ValueError("At least one series is required.")
+
+    return means_out, collected
+
+
+def plot_regret_series(
+    *,
+    series: Sequence[ExperimentSeries],
+    simulate_kwargs: Mapping[str, Any],
+    title: str = "Regret by Policy",
+    xlabel: str = "Time t",
+    ylabel: str = "Cumulative pseudo-regret",
+    figure_kwargs: Optional[Mapping[str, Any]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    grid_kwargs: Optional[Mapping[str, Any]] = None,
+    precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
+) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
+    if precomputed is None:
+        means, results = run_series_simulations(series=series, simulate_kwargs=simulate_kwargs)
+    else:
+        means, results = precomputed
+
+    T = int(simulate_kwargs["T"])
+    x = np.arange(T)
+
+    plt.figure(**dict(figure_kwargs or {}))
+
+    for spec in series:
+        label = spec.label or spec.policy_name
+        mean_curve, std_curve = results[label]
+        line_kwargs = dict(spec.plot_kwargs)
+        plt.plot(x, mean_curve, label=label, **line_kwargs)
+        plt.fill_between(
+            x,
+            mean_curve - std_curve,
+            mean_curve + std_curve,
+            alpha=spec.band_alpha,
+        )
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    if ylim is not None:
+        plt.ylim(*ylim)
+
+    merged_grid_kwargs: Dict[str, Any] = {}
+    if grid_kwargs:
+        merged_grid_kwargs.update(dict(grid_kwargs))
+    plt.grid(True, **merged_grid_kwargs)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return means, results
+
+
+def evaluate_final_regret_sweep(
+    *,
+    policy_name: str,
+    parameter_name: str,
+    values: Sequence[float],
+    simulate_kwargs: Mapping[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x_values = np.asarray(values, dtype=float)
+    mean_finals = []
+    std_finals = []
+
+    for value in values:
+        current_kwargs = _merge_sim_kwargs(simulate_kwargs, {parameter_name: value})
+        _, results = simulate(
+            policies=[policy_name],
+            **current_kwargs,
+        )
+        mean_curve, std_curve = results[policy_name]
+        mean_finals.append(float(mean_curve[-1]))
+        std_finals.append(float(std_curve[-1]))
+
+    return (
+        x_values,
+        np.asarray(mean_finals, dtype=float),
+        np.asarray(std_finals, dtype=float),
+    )
+
+
+def plot_final_regret_sweep(
+    *,
+    policy_name: str,
+    parameter_name: str,
+    values: Sequence[float],
+    simulate_kwargs: Mapping[str, Any],
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    highlight_points: Optional[Sequence[HighlightPoint]] = None,
+    figure_kwargs: Optional[Mapping[str, Any]] = None,
+    errorbar_kwargs: Optional[Mapping[str, Any]] = None,
+    grid_kwargs: Optional[Mapping[str, Any]] = None,
+    xscale: Optional[str] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x_values, mean_finals, std_finals = evaluate_final_regret_sweep(
+        policy_name=policy_name,
+        parameter_name=parameter_name,
+        values=values,
+        simulate_kwargs=simulate_kwargs,
+    )
+
+    order = np.argsort(x_values)
+    x_sorted = x_values[order]
+    mean_sorted = mean_finals[order]
+    std_sorted = std_finals[order]
+
+    plt.figure(**dict(figure_kwargs or {}))
+    base_errorbar_kwargs = {
+        "fmt": "o-",
+        "linewidth": 1,
+        "capsize": 2,
+        "label": "Average final cumulative regret",
+    }
+    if errorbar_kwargs:
+        base_errorbar_kwargs.update(dict(errorbar_kwargs))
+    plt.errorbar(
+        x_sorted,
+        mean_sorted,
+        yerr=std_sorted,
+        **base_errorbar_kwargs,
+    )
+
+    for point in highlight_points or []:
+        matches = np.where(np.isclose(x_sorted, point.value))[0]
+        if len(matches) == 0:
+            continue
+
+        idx = int(matches[0])
+        point_kwargs = {
+            "s": 120,
+            "edgecolor": "black",
+            "linewidth": 1.5,
+            "label": point.label,
+        }
+        point_kwargs.update(dict(point.plot_kwargs))
+        plt.scatter(
+            x_sorted[idx],
+            mean_sorted[idx],
+            **point_kwargs,
+        )
+
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    if xscale is not None:
+        plt.xscale(xscale)
+
+    merged_grid_kwargs = {"visible": True, "linestyle": "--", "alpha": 0.5}
+    if grid_kwargs:
+        merged_grid_kwargs.update(dict(grid_kwargs))
+    plt.grid(**merged_grid_kwargs)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    return x_sorted, mean_sorted, std_sorted
+
+
+def _validate_optimistic_hire_auto_gamma_inputs(
+    *,
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+    omega_max: int,
+) -> None:
+    if k <= 0:
+        raise ValueError("k must be positive.")
+    if m <= 0 or m >= k:
+        raise ValueError("auto gamma requires 1 <= m < k.")
+    if T <= 0:
+        raise ValueError("T must be positive.")
+    if c < 0:
+        raise ValueError("c must be non-negative.")
+    if omega_max < 0:
+        raise ValueError("omega_max must be non-negative.")
+
+
+def optimistic_hire_regret_bound(
+    gamma: float,
+    *,
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+    omega_max: int,
+) -> float:
+    """Upper bound used to select an automatic gamma for Optimistic-Hire."""
+    _validate_optimistic_hire_auto_gamma_inputs(
+        k=k,
+        m=m,
+        T=T,
+        c=c,
+        omega_max=omega_max,
+    )
+    if gamma <= 0:
+        raise ValueError("gamma must be > 0.")
+
+    log_kmt = math.log(k * m * T)
+    log_ratio = math.log((m * T) / ((k - m) * log_kmt))
+
+    leading_term = 5.0 * math.sqrt(m * (k - m) * T * log_kmt)
+    switching_term = c * (k - m) * math.log(T) + c * (k - m)
+    reciprocal_gamma_term = (
+        (8.0 * math.sqrt(k) / (m * gamma))
+        + (4.0 * k / (m * gamma))
+        + (21.0 / (m * gamma * k))
+    )
+    sqrt_gamma_term = (
+        2.0
+        * (k - m)
+        * math.sqrt(gamma * 4.0 * log_kmt)
+        * (1.0 + 0.5 * log_ratio)
+    )
+    inverse_sqrt_gamma_term = (
+        omega_max * m * math.sqrt((k * T) / gamma)
+        + c * m * math.sqrt((k * T) / gamma)
+    )
+
+    return (
+        leading_term
+        + switching_term
+        + k * (gamma + 1.0)
+        + reciprocal_gamma_term
+        + sqrt_gamma_term
+        + inverse_sqrt_gamma_term
+        + omega_max * m * k
+        + c * m * k
+    )
+
+
+def compute_optimistic_hire_auto_gamma(
+    *,
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+    omega_max: int,
+) -> float:
+    """Numerically minimize the Optimistic-Hire gamma bound over gamma > 0."""
+    _validate_optimistic_hire_auto_gamma_inputs(
+        k=k,
+        m=m,
+        T=T,
+        c=c,
+        omega_max=omega_max,
+    )
+
+    log_kmt = math.log(k * m * T)
+    log_ratio = math.log((m * T) / ((k - m) * log_kmt))
+
+    reciprocal_gamma_coeff = (
+        (8.0 * math.sqrt(k) / m)
+        + (4.0 * k / m)
+        + (21.0 / (m * k))
+    )
+    sqrt_gamma_coeff = (
+        2.0
+        * (k - m)
+        * math.sqrt(4.0 * log_kmt)
+        * (1.0 + 0.5 * log_ratio)
+    )
+    inverse_sqrt_gamma_coeff = (omega_max + c) * m * math.sqrt(k * T)
+
+    # With x = sqrt(gamma), the derivative is:
+    #   2k x + sqrt_gamma_coeff - inverse_sqrt_gamma_coeff / x^2
+    #   - 2 * reciprocal_gamma_coeff / x^3 = 0
+    # which becomes the quartic
+    #   2k x^4 + sqrt_gamma_coeff x^3 - inverse_sqrt_gamma_coeff x - 2B = 0.
+    roots = np.roots(
+        [
+            2.0 * k,
+            sqrt_gamma_coeff,
+            0.0,
+            -inverse_sqrt_gamma_coeff,
+            -2.0 * reciprocal_gamma_coeff,
+        ]
+    )
+
+    candidate_gammas = [
+        float(root.real) ** 2
+        for root in roots
+        if abs(root.imag) < 1e-9 and root.real > 0
+    ]
+
+    if not candidate_gammas:
+        search_grid = np.logspace(-8, 8, num=400)
+        candidate_gammas = [float(gamma) for gamma in search_grid]
+
+    return min(
+        candidate_gammas,
+        key=lambda gamma: optimistic_hire_regret_bound(
+            gamma,
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        ),
+    )
 
 def make_policy(
     policy_name: str,
@@ -38,7 +413,7 @@ def make_policy(
     rng: random.Random,
     epsilon: float = 0.1,
     ucb_coef: float = 2.0,
-    gamma: float = 0.5,
+    gamma: float | str = 0.5,
 ):
     """
     Factory to build a policy object consistent with the simulation interface.
@@ -46,7 +421,7 @@ def make_policy(
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
       - "ucb", "vanilla-ucb", "vanilla ucb"
-      - "optimistic-hire", "optimistic hire", "paper", "algorithm-1"
+      - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
     """
     name = policy_name.lower().strip()
@@ -66,8 +441,21 @@ def make_policy(
         return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
     # Adaptive batching algorithm from the paper
-    elif name in {"optimistic-hire", "optimistic hire", "paper", "algorithm-1"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=gamma, horizon=T, rng=rng)
+    elif name in {"optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"}:
+        resolved_gamma: float
+        if name == "optimistic-hire-auto" or gamma == "auto":
+            resolved_gamma = compute_optimistic_hire_auto_gamma(
+                k=k,
+                m=m,
+                T=T,
+                c=c,
+                omega_max=omega_max,
+            )
+        elif isinstance(gamma, str):
+            raise ValueError("gamma must be a positive float or 'auto'.")
+        else:
+            resolved_gamma = float(gamma)
+        return HiringUCBPolicy(k=k, m=m, gamma=resolved_gamma, horizon=T, rng=rng)
     
     elif name in {"optimistic-hire-gamma-1"}:
         return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
@@ -95,7 +483,7 @@ def run_episode(
     delay_sampler: Callable,
     T: int,
     epsilon: float,
-    gamma: float,
+    gamma: float | str,
     c: float,
     omega_max: int,
     seed: int,
@@ -163,7 +551,7 @@ def simulate(
     reward_sampler_factory: Optional[Callable[[int], Sequence[Callable]]] = None,
     delay_sampler_factory: Optional[Callable[[int], Callable]] = None,
     epsilon: float = 0.1,
-    gamma: float = 0.5,
+    gamma: float | str = 0.5,
     c: float = 1,
     omega_max: int = 3,
     n_runs: int = 50,
@@ -252,64 +640,44 @@ def run_policy_comparisons(
     base_seed: int = 12345,  
     title: str = 'Regret by Policy'
 ) -> None:
-    
     if labels is None:
         labels = policies
 
-    if delay_process_name in {'uniform', 'random', 'stochastic', 'iid'}:
-        delay_sampler_factory = lambda seed: make_uniform_delay_sampler(
-            omega_max,
-            _seeded_rng(seed, "delay"),
-        )
-    elif delay_process_name in {'adversarial', 'wc'}:
-        delay_sampler_factory = lambda seed: make_adversarial_delay(
-            means=means,
-            omega_max=omega_max,
-        )
-    else:
-        raise ValueError(
-            "delay_process_name must be one of: 'uniform', 'random', "
-            "'stochastic', 'iid', 'adversarial', or 'wc'."
-        )
-
-    # --- Run simulation ---
-    means, results = simulate(
-        policies=policies,
-        k=k,
-        m=m,
-        T=T,
+    delay_sampler_factory = make_delay_sampler_factory(
+        delay_process_name,
         means=means,
-        delay_sampler_factory=delay_sampler_factory,
-        c=c,
         omega_max=omega_max,
-        n_runs=n_runs,
-        seed0=base_seed
     )
 
+    series = [
+        ExperimentSeries(policy_name=pname, label=plabel)
+        for plabel, pname in zip(labels, policies)
+    ]
+    simulate_kwargs = {
+        "k": k,
+        "m": m,
+        "T": T,
+        "means": means,
+        "delay_sampler_factory": delay_sampler_factory,
+        "c": c,
+        "omega_max": omega_max,
+        "n_runs": n_runs,
+        "seed0": base_seed,
+    }
+
+    means, results = run_series_simulations(
+        series=series,
+        simulate_kwargs=simulate_kwargs,
+    )
 
     print("True means (sorted high to low):")
     print(np.round(means, 3))
-
-    plt.figure()
-    x = np.arange(T)
-
-    for plabel, pname in zip(labels, policies):
-        mean_curve, std_curve = results[pname]
-        plt.plot(x, mean_curve, label=plabel)
-        plt.fill_between(
-            x,
-            mean_curve - std_curve,
-            mean_curve + std_curve,
-            alpha=0.15,
-        )
-
-    plt.xlabel("Time t")
-    plt.ylabel("Cumulative pseudo-regret")
-    plt.title(title)
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    plot_regret_series(
+        series=series,
+        simulate_kwargs=simulate_kwargs,
+        title=title,
+        precomputed=(means, results),
+    )
 
 
 """
@@ -328,58 +696,34 @@ def run_gamma_sweep(
     n_runs: int = 20,
     base_seed: int = 12345,
 ) -> None:
-    """
-    Run average regret trajectories for a multiple values of gamma.
-    Can only be used with optimistic-hire for obvious reaons
-    """
-
-    def label_fun(gamma: float, c: float, omega: int) -> str:
-        return rf"$\gamma={gamma:.2f}$, $c={c:.2f}$, $\omega_\max = {omega}$"
-
-    plt.figure(figsize=(8, 5))
-    time_axis = np.arange(1, T + 1)
-
-    for _, val in enumerate(gammas):
-        
-        gamma = float(val)
-
-        def label_fun(gamma: float, c: float, omega: int) -> str:
-            return rf"$\gamma={gamma:.2f}$"
-
-        _, results = simulate(
-                policies=['optimistic-hire'],
-                k=k,
-                m=m,
-                T=T,
-                gamma=gamma,
-                c=c,
-                omega_max=omega_max,
-                means=means,
-                seed0=base_seed,
-                n_runs=20
-            )
-        
-        mean_curve, std_curve = results["optimistic-hire"]
-
-        label = label_fun(gamma=gamma, c=c, omega=omega_max)
-
-        plt.plot(time_axis, mean_curve, linewidth=2, label=label)
-        plt.fill_between(
-            time_axis,
-            mean_curve - std_curve,
-            mean_curve + std_curve,
-            alpha=0.15,
-            linewidth=0,
+    series = [
+        ExperimentSeries(
+            policy_name="optimistic-hire",
+            label=rf"$\gamma={float(gamma):.2f}$",
+            sim_kwargs={"gamma": float(gamma)},
+            plot_kwargs={"linewidth": 2},
         )
-
-    plt.xlabel("t")
-    plt.ylabel("Cumulative regret")
-    plt.ylim(0,2500)
-    plt.title(rf"Average regret over {n_runs} runs with $c = {c}$ and $\omega_\max = {omega_max}$")
-    plt.grid(True, which="both", linestyle="--", alpha=0.5)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+        for gamma in gammas
+    ]
+    plot_regret_series(
+        series=series,
+        simulate_kwargs={
+            "k": k,
+            "m": m,
+            "T": T,
+            "means": means,
+            "c": c,
+            "omega_max": omega_max,
+            "n_runs": n_runs,
+            "seed0": base_seed,
+        },
+        title=rf"Average regret over {n_runs} runs with $c = {c}$ and $\omega_\max = {omega_max}$",
+        xlabel="t",
+        ylabel="Cumulative regret",
+        figure_kwargs={"figsize": (8, 5)},
+        ylim=(0, 2500),
+        grid_kwargs={"which": "both", "linestyle": "--", "alpha": 0.5},
+    )
 
 def run_c_sweep(
     *,
@@ -393,57 +737,33 @@ def run_c_sweep(
     n_runs: int = 20,
     base_seed: int = 12345,
 ) -> None:
-    """
-    Run average regret trajectories for a multiple values of gamma.
-    Can only be used with optimistic-hire for obvious reaons
-    """
-
-    def label_fun(c: float, omega: int) -> str:
-        return rf"$c={c:.2f}$, $\omega_\max = {omega}$"
-
-    plt.figure(figsize=(8, 5))
-    time_axis = np.arange(1, T + 1)
-
-    for _, val in enumerate(c_values):
-        
-        c = float(val)
-
-        def label_fun(c: float, omega: int) -> str:
-            return rf"$c={c:.2f}$"
-
-        _, results = simulate(
-                policies=[policy_name],
-                k=k,
-                m=m,
-                T=T,
-                c=val,
-                omega_max=omega_max,
-                means=means,
-                seed0=base_seed,
-                n_runs=20
-            )
-        
-        mean_curve, std_curve = results[policy_name]
-
-        label = label_fun(c=val, omega=omega_max)
-
-        plt.plot(time_axis, mean_curve, linewidth=2, label=label)
-        plt.fill_between(
-            time_axis,
-            mean_curve - std_curve,
-            mean_curve + std_curve,
-            alpha=0.15,
-            linewidth=0,
+    series = [
+        ExperimentSeries(
+            policy_name=policy_name,
+            label=rf"$c={float(value):.2f}$",
+            sim_kwargs={"c": float(value)},
+            plot_kwargs={"linewidth": 2},
         )
-
-    plt.xlabel("t")
-    plt.ylabel("Cumulative regret")
-    plt.ylim(0,3500)
-    plt.title(rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$")
-    plt.grid(True, which="both", linestyle="--", alpha=0.5)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+        for value in c_values
+    ]
+    plot_regret_series(
+        series=series,
+        simulate_kwargs={
+            "k": k,
+            "m": m,
+            "T": T,
+            "means": means,
+            "omega_max": omega_max,
+            "n_runs": n_runs,
+            "seed0": base_seed,
+        },
+        title=rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$",
+        xlabel="t",
+        ylabel="Cumulative regret",
+        figure_kwargs={"figsize": (8, 5)},
+        ylim=(0, 3500),
+        grid_kwargs={"which": "both", "linestyle": "--", "alpha": 0.5},
+    )
 
 def run_omega_sweep(
     *,
@@ -459,66 +779,41 @@ def run_omega_sweep(
     base_seed: int = 12345,
     y_up_lim: int = 2500
 ) -> None:
-    """
-    Run average regret trajectories for a multiple values of gamma.
-    Can only be used with optimistic-hire for obvious reaons
+    if omega_process not in {"stochastic", "adversarial"}:
+        raise ValueError("delays process not one of: 'stochastic', 'adversarial'")
 
-    pick between delay processes: 'stochastic', 'adversarial'
-    """
-
-    rng = random.Random(base_seed)
-
-    def label_fun(c: float, omega: int) -> str:
-        return rf"$c={c:.2f}$, $\omega_\max = {omega}$"
-
-    plt.figure(figsize=(8, 5))
-    time_axis = np.arange(1, T + 1)
-
-    for _, val in enumerate(omega_max_values):
-        
-        omega = int(val)
-
-        if omega_process == 'stochastic':
-            delay_sampler = make_uniform_delay_sampler(omega, rng)
-        elif omega_process == 'adversarial':
-            delay_sampler = make_adversarial_delay(means, omega)
-        else:
-            raise ValueError("delays process not one of: 'stochastic', 'adversarial'")
-
-        def label_fun(c: float, omega: int) -> str:
-            return rf"$\omega_\max={omega:.2f}$"
-
-        _, results = simulate(
-                policies=[policy_name],
-                k=k,
-                m=m,
-                T=T,
-                c=c,
-                omega_max=omega,
-                delay_sampler=delay_sampler,
-                means=means,
-                seed0=base_seed,
-                n_runs=20
-            )
-        
-        mean_curve, std_curve = results[policy_name]
-
-        label = label_fun(c=c, omega=omega)
-
-        plt.plot(time_axis, mean_curve, linewidth=2, label=label)
-        plt.fill_between(
-            time_axis,
-            mean_curve - std_curve,
-            mean_curve + std_curve,
-            alpha=0.15,
-            linewidth=0,
+    delay_name = "stochastic" if omega_process == "stochastic" else "adversarial"
+    series = [
+        ExperimentSeries(
+            policy_name=policy_name,
+            label=rf"$\omega_\max={int(value):.2f}$",
+            sim_kwargs={
+                "omega_max": int(value),
+                "delay_sampler_factory": make_delay_sampler_factory(
+                    delay_name,
+                    means=means,
+                    omega_max=int(value),
+                ),
+            },
+            plot_kwargs={"linewidth": 2},
         )
-
-    plt.xlabel("t")
-    plt.ylabel("Cumulative regret")
-    plt.ylim(0,y_up_lim)
-    plt.title(rf"Average regret over {n_runs} runs with $c = {c}$ and {omega_process} delay process.")
-    plt.grid(True, which="both", linestyle="--", alpha=0.5)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+        for value in omega_max_values
+    ]
+    plot_regret_series(
+        series=series,
+        simulate_kwargs={
+            "k": k,
+            "m": m,
+            "T": T,
+            "means": means,
+            "c": c,
+            "n_runs": n_runs,
+            "seed0": base_seed,
+        },
+        title=rf"Average regret over {n_runs} runs with $c = {c}$ and {omega_process} delay process.",
+        xlabel="t",
+        ylabel="Cumulative regret",
+        figure_kwargs={"figsize": (8, 5)},
+        ylim=(0, y_up_lim),
+        grid_kwargs={"which": "both", "linestyle": "--", "alpha": 0.5},
+    )
