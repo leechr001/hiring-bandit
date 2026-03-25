@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union, Any
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, Union
 import random
 
 
@@ -16,6 +16,23 @@ class PendingReplacement:
     j: int
     start_time: int
     completion_time: int
+
+
+@dataclass(frozen=True)
+class EnvObservation:
+    """Observable environment state at the start of a period."""
+    t: int
+    active_set: FrozenSet[int]
+    pending_replacements: Tuple[Tuple[int, int, int, int], ...]
+
+
+@dataclass(frozen=True)
+class StepFeedback:
+    """Semi-bandit feedback and transition details from one environment step."""
+    individual_rewards: Dict[int, float]
+    active_set: FrozenSet[int]
+    completed_this_period: Tuple[Tuple[int, int], ...]
+    pending_count: int
 
 
 class TemporaryHiringBanditEnv:
@@ -88,7 +105,7 @@ class TemporaryHiringBanditEnv:
             initial_workforce = list(range(1, m + 1))
         self.reset(initial_workforce)
 
-    def reset(self, initial_workforce: Optional[Sequence[int]] = None) -> Dict:
+    def reset(self, initial_workforce: Optional[Sequence[int]] = None) -> EnvObservation:
         """Reset environment to period 1 with a specified initial active workforce."""
         if initial_workforce is None:
             initial_workforce = list(range(1, self.m + 1))
@@ -104,15 +121,15 @@ class TemporaryHiringBanditEnv:
         self.pending = []
         return self._get_obs()
 
-    def _get_obs(self) -> Dict:
+    def _get_obs(self) -> EnvObservation:
         """Return a simple observable state for simulation/debugging."""
-        return {
-            "t": self.t,
-            "active_set": set(self.active_set),
-            "pending_replacements": [
+        return EnvObservation(
+            t=self.t,
+            active_set=frozenset(self.active_set),
+            pending_replacements=tuple(
                 (pr.i, pr.j, pr.start_time, pr.completion_time) for pr in self.pending
-            ],
-        }
+            ),
+        )
 
     def _workers_in_pending(self) -> Set[int]:
         s: Set[int] = set()
@@ -157,7 +174,7 @@ class TemporaryHiringBanditEnv:
     def step(
         self,
         replacements: Optional[Sequence[Tuple[int, int]]] = None
-    ) -> Tuple[Dict, float, float, Dict]:
+    ) -> Tuple[EnvObservation, float, float, StepFeedback]:
         """
         Advance one period.
 
@@ -214,16 +231,16 @@ class TemporaryHiringBanditEnv:
             individual[i] = r
             total += r
 
-        info = {
-            "individual_rewards": individual,
-            "active_set": set(self.active_set),
-            "completed_this_period": [(pr.i, pr.j) for pr in completing],
-            "pending_count": len(self.pending),
-        }
+        feedback = StepFeedback(
+            individual_rewards=dict(individual),
+            active_set=frozenset(self.active_set),
+            completed_this_period=tuple((pr.i, pr.j) for pr in completing),
+            pending_count=len(self.pending),
+        )
 
         # Advance time
         self.t += 1
-        return self._get_obs(), total, cost, info
+        return self._get_obs(), total, cost, feedback
 
     # --- Convenience helpers ---
 

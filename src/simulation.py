@@ -46,7 +46,7 @@ def make_policy(
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
       - "ucb", "vanilla-ucb", "vanilla ucb"
-      - "hiring-ucb", "hiring ucb", "paper", "algorithm-1"
+      - "optimistic-hire", "optimistic hire", "paper", "algorithm-1"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
     """
     name = policy_name.lower().strip()
@@ -66,16 +66,16 @@ def make_policy(
         return VanillaUCBHiringPolicy(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
     # Adaptive batching algorithm from the paper
-    elif name in {"hiring-ucb", "hiring ucb", "paper", "algorithm-1"}:
+    elif name in {"optimistic-hire", "optimistic hire", "paper", "algorithm-1"}:
         return HiringUCBPolicy(k=k, m=m, gamma=gamma, horizon=T, rng=rng)
     
-    elif name in {"hiring-ucb-gamma-1"}:
+    elif name in {"optimistic-hire-gamma-1"}:
         return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
     
-    elif name in {"hiring-ucb-gamma-2"}:
+    elif name in {"optimistic-hire-gamma-2"}:
         return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max) * m, horizon=T, rng=rng)
     
-    elif name in {"hiring-ucb-gamma-3"}:
+    elif name in {"optimistic-hire-gamma-3"}:
         return HiringUCBPolicy(k=k, m=m, gamma=c * m, horizon=T, rng=rng)
     
     # Paper by Agrawal, Hedge, and Teneketzis 
@@ -139,11 +139,11 @@ def run_episode(
         replacements = policy.act(env)
         env.validate_replacements(replacements)
 
-        obs, total_reward, cost, info = env.step(replacements)
+        obs, total_reward, cost, feedback = env.step(replacements)
 
-        policy.update(info["individual_rewards"])
+        policy.update(feedback)
 
-        active_now = info["active_set"]
+        active_now = feedback.active_set
         active_expected = sum(means[i - 1] for i in active_now)
 
         # Pseudo-regret increment: gap to oracle + switching cost
@@ -330,7 +330,7 @@ def run_gamma_sweep(
 ) -> None:
     """
     Run average regret trajectories for a multiple values of gamma.
-    Can only be used with hiring-ucb for obvious reaons
+    Can only be used with optimistic-hire for obvious reaons
     """
 
     def label_fun(gamma: float, c: float, omega: int) -> str:
@@ -347,7 +347,7 @@ def run_gamma_sweep(
             return rf"$\gamma={gamma:.2f}$"
 
         _, results = simulate(
-                policies=['hiring-ucb'],
+                policies=['optimistic-hire'],
                 k=k,
                 m=m,
                 T=T,
@@ -359,7 +359,7 @@ def run_gamma_sweep(
                 n_runs=20
             )
         
-        mean_curve, std_curve = results["hiring-ucb"]
+        mean_curve, std_curve = results["optimistic-hire"]
 
         label = label_fun(gamma=gamma, c=c, omega=omega_max)
 
@@ -386,7 +386,7 @@ def run_c_sweep(
     k: int,
     m: int,
     T: int,
-    policy_name: str = 'hiring-ucb',
+    policy_name: str = 'optimistic-hire',
     means: Sequence[float],
     c_values: Sequence[float],
     omega_max: int,
@@ -395,7 +395,7 @@ def run_c_sweep(
 ) -> None:
     """
     Run average regret trajectories for a multiple values of gamma.
-    Can only be used with hiring-ucb for obvious reaons
+    Can only be used with optimistic-hire for obvious reaons
     """
 
     def label_fun(c: float, omega: int) -> str:
@@ -450,7 +450,7 @@ def run_omega_sweep(
     k: int,
     m: int,
     T: int,
-    policy_name: str = 'hiring-ucb',
+    policy_name: str = 'optimistic-hire',
     means: Sequence[float],
     c: float,
     omega_max_values: Sequence[float],
@@ -461,7 +461,7 @@ def run_omega_sweep(
 ) -> None:
     """
     Run average regret trajectories for a multiple values of gamma.
-    Can only be used with hiring-ucb for obvious reaons
+    Can only be used with optimistic-hire for obvious reaons
 
     pick between delay processes: 'stochastic', 'adversarial'
     """

@@ -4,14 +4,14 @@ import random
 import numpy as np
 
 policies = [
-    "hiring-ucb-gamma-1", 
-    "hiring-ucb-gamma-2",
+    "optimistic-hire-gamma-1", 
+    "optimistic-hire-gamma-2",
     "AHT"
 ]
 
 labels = [
-    r"Hiring-UCB, $\gamma=(c+\omega_\max)^2 m$",
-    r"Hiring-UCB, $\gamma=(c+\omega_\max) m$",
+    r"Optimistic-Hire, $\gamma=(c+\omega_\max)^2 m$",
+    r"Optimistic-Hire, $\gamma=(c+\omega_\max) m$",
     "AgrawalHegdeTeneketzis"
 ]
 

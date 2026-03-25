@@ -44,7 +44,7 @@ for idx, gamma in enumerate(gammas):
 
         # simulate for one run and grab only final cum_regret
         _, results = simulate(
-                policies=['hiring-ucb'],
+                policies=['optimistic-hire'],
                 k=k,
                 m=m,
                 T=T,
@@ -56,7 +56,7 @@ for idx, gamma in enumerate(gammas):
                 n_runs=1
             )
         
-        mean_curve, std_curve = results['hiring-ucb']
+        mean_curve, std_curve = results['optimistic-hire']
         cum_regret = mean_curve[-1]
         final_regrets.append(cum_regret)
 

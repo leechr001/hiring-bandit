@@ -1,4 +1,5 @@
-from policies import DelayedActionPolicy
+from bandit_environment import StepFeedback
+from policies import StatefulDelayedActionPolicy
 
 import math
 import random
@@ -16,16 +17,14 @@ class HiringUCBConfig:
     ucb_coef: float = 2.0
 
 
-class HiringUCBPolicy(DelayedActionPolicy):
+class HiringUCBPolicy(StatefulDelayedActionPolicy):
     """
-    Implements Algorithm 1 (Hiring-UCB).
+    Implements Algorithm 1 (Optimistic-Hire).
 
     Assumptions about env:
     - env.active_set: current active set as an iterable of 1-indexed worker IDs.
-    - env.step(replacements) returns (obs, total_reward, cost, info)
-    - info includes:
-        - "individual_rewards": Dict[int, float]
-        - "active_set": iterable of 1-indexed worker IDs
+    - env.step(replacements) returns (obs, total_reward, cost, feedback)
+    - feedback is a StepFeedback object with observed rewards and the realized active set.
 
     Iteration structure:
     - At the start of each iteration, compute a target workforce U_ell (top-m by UCB, respecting cost constraint),
@@ -33,7 +32,7 @@ class HiringUCBPolicy(DelayedActionPolicy):
       at iteration start c_ell.
     - Initiate one-for-one replacements to move toward U_ell.
     - Transition phase: do not initiate further replacements until env.active_set == U_ell.
-    - Buffer phase: hold the workforce fixed until
+    - Hold phase: keep the workforce fixed until
           T_{i_min}(t) - T_{i_min}(c_ell) >= N(ell),
       where T_i is the cumulative number of observed outcomes for worker i.
 
@@ -49,26 +48,13 @@ class HiringUCBPolicy(DelayedActionPolicy):
         horizon: Optional[int] = None,
         rng: Optional[random.Random] = None,
     ):
-        if not (1 <= m < k):
-            raise ValueError("Require 1 <= m < k.")
+        super().__init__(k=k, m=m, rng=rng)
         if gamma <= 0:
             raise ValueError("gamma must be > 0.")
         if horizon is not None and horizon <= 0:
             raise ValueError("horizon must be > 0 when provided.")
 
         self.cfg = HiringUCBConfig(k=k, m=m, gamma=gamma, horizon=horizon)
-        self.rng = rng or random.Random()
-
-        # Empirical stats from observed semi-bandit feedback used to construct index
-        self.counts = np.zeros(k, dtype=np.int64)
-        self.sums = np.zeros(k, dtype=np.float64)
-
-        # Period counter for log term in UCB
-        self.t = 0
-
-        # Iteration state
-        self.phase = "init"  # init -> ready -> transition -> buffer
-        self.current_target: Set[int] = set()
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
 
@@ -76,67 +62,45 @@ class HiringUCBPolicy(DelayedActionPolicy):
         self.i_min: Optional[int] = None                 # 1-indexed worker ID
         self.i_min_count_at_c: Optional[int] = None      # T_{i_min}(c_ell)
         self.buffer_threshold_N: int = 0                  # N(ell)
+        self.reset()
 
     # ----------------------------
-    # Define Control API Methods
+    # StatefulDelayedActionPolicy hooks
     # ----------------------------
 
-    def reset(self):
-        """Reset internal state and empirical statistics."""
-        self.counts.fill(0)
-        self.sums.fill(0.0)
-        self.t = 0
-        self.phase = "init"
-        self.current_target = set()
+    def reset_control_state(self) -> None:
         self.prev_target = set()
         self.iterations = 0
-
         self.i_min = None
         self.i_min_count_at_c = None
         self.buffer_threshold_N = 0
 
-    def update(self, individual_rewards: Dict[int, float]):
-        """
-        Update empirical statistics after a single environment step.
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
+        self.prev_target = set(active_now)
+        self.current_target = set(active_now)
+        self.phase = "ready"
 
-        Parameters
-        ----------
-        individual_rewards:
-            Mapping from 1-indexed worker ID to observed reward for workers that were active
-            and produced feedback this period.
-        """
-        observed_active = {int(worker_id) for worker_id in individual_rewards}
-        for worker_id, r in individual_rewards.items():
-            idx = worker_id - 1
-            self.counts[idx] += 1
-            self.sums[idx] += float(r)
+    def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
+        if self.phase != "ready":
+            return None
 
-        self.t += 1
+        self.iterations += 1
 
-        # Count the first target-active reward period as part of the buffer.
-        if self.phase == "transition" and observed_active == self.current_target:
-            self.phase = "buffer"
+        new_target = self.compute_target()
+        self.buffer_threshold_N = self.compute_buffer_length(new_target)
+        self.i_min, self.i_min_count_at_c = self._compute_i_min_and_baseline(new_target)
+        return sorted(new_target)
 
-        if self.phase == "buffer":
-            # End the buffer phase once i_min has accrued N(ell) additional observations since c_ell.
-            if self.i_min is None or self.i_min_count_at_c is None:
-                # Defensive: avoid deadlock if state is inconsistent.
-                self.prev_target = set(self.current_target)
-                self.phase = "ready"
-                return
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        if self.i_min is None or self.i_min_count_at_c is None:
+            self.prev_target = set(self.current_target)
+            self.phase = "ready"
+            return
 
-            cur = int(self.counts[self.i_min - 1])
-            # T_{i_min}(t) - T_{i_min}(c_ell) >= N(ell)
-            if cur - int(self.i_min_count_at_c) >= int(self.buffer_threshold_N):
-                self.prev_target = set(self.current_target)
-                self.phase = "ready"
-
-    def empirical_means(self) -> np.ndarray:
-        """Return the vector of empirical means (0 for unseen workers)."""
-        means = np.zeros(self.cfg.k, dtype=np.float64)
-        mask = self.counts > 0
-        means[mask] = self.sums[mask] / self.counts[mask]
-        return means
+        cur = int(self.counts[self.i_min - 1])
+        if cur - int(self.i_min_count_at_c) >= int(self.buffer_threshold_N):
+            self.prev_target = set(self.current_target)
+            self.phase = "ready"
     
     def _confidence_rad(self, i:int):
         """Return the confidence radius for arm i"""
@@ -320,60 +284,15 @@ class HiringUCBPolicy(DelayedActionPolicy):
 
         return i_min, min_count
 
-    # ----------------------------
-    # Public control API
-    # ----------------------------
-
-    def act(self, env) -> List[Tuple[int, int]]:
-        """
-        Decide which replacements to initiate at the start of the current period.
-
-        Policy rule:
-        - Initiate replacements only when starting a new iteration (phase == "ready").
-        - During transition and buffer phases, return [].
-
-        Returns
-        -------
-        A list of (remove_id, add_id) replacement pairs to initiate this period.
-        """
-        active_now = sorted(list(env.active_set))
-
-        if self.phase == "init":
-            # Treat the initial active workforce as U_0.
-            self.prev_target = set(active_now)
-            self.current_target = set(active_now)
-            self.phase = "ready"
-
-        if self.phase == "ready":
-            self.iterations += 1
-
-            new_target = self.compute_target()
-            N = self.compute_buffer_length(new_target)
-
-            i_min, baseline = self._compute_i_min_and_baseline(new_target)
-            self.i_min = i_min
-            self.i_min_count_at_c = baseline
-            self.buffer_threshold_N = N
-
-            reps = self.bijection(
-                active_now,
-                sorted(new_target),
-                current_period=env.t,
-                switching_cost=env.c,
-            )
-
-            self.current_target = set(new_target)
-            self.phase = "transition"
-            return reps
-
-        if self.phase == "transition":
-            # Wait until target workforce is fully active.
-            if set(active_now) == self.current_target:
-                self.phase = "buffer"
-            return []
-
-        if self.phase == "buffer":
-            # Hold workforce fixed until the buffer stopping rule is met in update().
-            return []
-
-        return []
+    def build_proposed_replacements(
+        self,
+        active: Sequence[int],
+        target: Sequence[int],
+        env,
+    ) -> List[Tuple[int, int]]:
+        return self.bijection(
+            active,
+            target,
+            current_period=env.t,
+            switching_cost=env.c,
+        )

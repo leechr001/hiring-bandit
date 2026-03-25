@@ -4,15 +4,15 @@ import random
 import numpy as np
 
 policies = [
-    "hiring-ucb-gamma-1", 
-    "hiring-ucb-gamma-2",
+    "optimistic-hire-gamma-1", 
+    "optimistic-hire-gamma-2",
     "UCB", 
     "Epsilon-Greedy",
 ]
 
 labels = [
-    r"Hiring-UCB, $\gamma=(c+\omega_\max)^2 m$",
-    r"Hiring-UCB, $\gamma=(c+\omega_\max) m$",
+    r"Optimistic-Hire, $\gamma=(c+\omega_\max)^2 m$",
+    r"Optimistic-Hire, $\gamma=(c+\omega_\max) m$",
     "UCB",
     r"$\epsilon$-Greedy",
 ]
@@ -36,5 +36,5 @@ run_policy_comparisons(
     c=c,
     omega_max=omega_max,
     n_runs=20,
-    title=rf'Performance of Hiring-UCB for two theoretical choices of $\gamma$.'
+    title=rf'Performance of Optimistic-Hire for two theoretical choices of $\gamma$.'
 )

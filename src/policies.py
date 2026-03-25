@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bandit_environment import StepFeedback
 from bijections import make_bijection
 
 import math
@@ -18,7 +19,7 @@ class DelayedActionPolicy(ABC):
 
     Subclasses must implement:
       - reset()
-      - update(individual_rewards)
+      - update(feedback)
       - compute_target()
     """
 
@@ -45,7 +46,7 @@ class DelayedActionPolicy(ABC):
         self.omega_max = int(omega_max)
 
         # Set the type of bijection to be used
-        self.bijection = make_bijection(bijection_name)
+        self._bijection_fn = make_bijection(bijection_name)
 
         # Default seeded RNG for reproducibility unless caller supplies one.
         self.rng = rng or random.Random(123)
@@ -56,10 +57,9 @@ class DelayedActionPolicy(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update(self, individual_rewards: Dict[int, float]) -> None:
+    def update(self, feedback: StepFeedback) -> None:
         """
-        Update internal statistics with semi-bandit feedback:
-        individual_rewards maps worker_id (1..k) -> realized reward.
+        Update internal statistics with one environment feedback object.
         """
         raise NotImplementedError
 
@@ -70,6 +70,42 @@ class DelayedActionPolicy(ABC):
         The environment will attempt to move from current active_set to this target.
         """
         raise NotImplementedError
+
+    def _normalize_target(self, target: Sequence[int]) -> List[int]:
+        target_set = sorted(set(int(x) for x in target))
+        if len(target_set) != self.m:
+            raise ValueError(
+                f"compute_target() must return exactly {self.m} distinct worker IDs."
+            )
+        return target_set
+
+    def build_proposed_replacements(
+        self,
+        active: Sequence[int],
+        target: Sequence[int],
+        env,
+    ) -> List[Tuple[int, int]]:
+        return self._bijection_fn(active, target, rng=self.rng)
+
+    def _propose_replacements_from_target(
+        self,
+        env,
+        target: Sequence[int],
+    ) -> List[Tuple[int, int]]:
+        target_set = self._normalize_target(target)
+        active = sorted(env.active_set)
+        proposed = self.build_proposed_replacements(active, target_set, env)
+
+        feasible: List[Tuple[int, int]] = []
+        for pair in proposed:
+            candidate = feasible + [pair]
+            try:
+                env.validate_replacements(candidate)
+            except ValueError:
+                continue
+            feasible.append(pair)
+
+        return feasible
 
     def act(self, env) -> List[Tuple[int, int]]:
         """
@@ -83,33 +119,105 @@ class DelayedActionPolicy(ABC):
         target = self.compute_target()
         if not target:
             return []
+        return self._propose_replacements_from_target(env, target)
 
-        # Normalize target: unique, sorted, valid IDs.
-        # (If a subclass returns duplicates, we clean it up here.)
-        target_set = sorted(set(int(x) for x in target))
-        if len(target_set) != self.m:
-            raise ValueError(
-                f"compute_target() must return exactly {self.m} distinct worker IDs."
-            )
 
-        active = sorted(env.active_set)
+class EmpiricalDelayedActionPolicy(DelayedActionPolicy):
+    """Shared empirical-statistics machinery for delayed-action policies."""
 
-        proposed: List[Tuple[int, int]] = self.bijection(active, target_set, rng=self.rng)
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.counts = np.zeros(self.k, dtype=np.int64)
+        self.sums = np.zeros(self.k, dtype=np.float64)
+        self.t = 0
 
-        # Greedily keep only the subset that remains valid.
-        feasible: List[Tuple[int, int]] = []
-        for pair in proposed:
-            candidate = feasible + [pair]
-            try:
-                env.validate_replacements(candidate)
-            except ValueError:
+    def reset(self) -> None:
+        self.counts.fill(0)
+        self.sums.fill(0.0)
+        self.t = 0
+        self.reset_policy_state()
+
+    def reset_policy_state(self) -> None:
+        """Reset subclass-specific control state."""
+
+    def update(self, feedback: StepFeedback) -> None:
+        self.observe_rewards(feedback.individual_rewards)
+        self.t += 1
+        self.after_feedback(feedback)
+
+    def after_feedback(self, feedback: StepFeedback) -> None:
+        """Handle control-flow updates after observing rewards."""
+
+    def observe_rewards(self, individual_rewards: Dict[int, float]) -> None:
+        for worker_id, reward in individual_rewards.items():
+            idx = int(worker_id) - 1
+            if 0 <= idx < self.k:
+                self.counts[idx] += 1
+                self.sums[idx] += float(reward)
+
+    def empirical_means(self) -> np.ndarray:
+        means = np.zeros(self.k, dtype=np.float64)
+        mask = self.counts > 0
+        means[mask] = self.sums[mask] / self.counts[mask]
+        return means
+
+
+class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
+    """Shared transition/hold control flow for policies with delayed switching."""
+
+    def reset_policy_state(self) -> None:
+        self.phase = "init"  # init -> ready/warmup -> transition -> hold
+        self.current_target: Set[int] = set()
+        self.reset_control_state()
+
+    def reset_control_state(self) -> None:
+        """Reset subclass-specific transition/hold state."""
+
+    @abstractmethod
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
+        """Initialize control state from the environment's starting workforce."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
+        """Advance control state until a target is ready, or return None to wait."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        """Advance hold-phase bookkeeping after a reward observation."""
+        raise NotImplementedError
+
+    def after_feedback(self, feedback: StepFeedback) -> None:
+        if self.phase == "transition" and set(feedback.active_set) == self.current_target:
+            self.phase = "hold"
+
+        if self.phase == "hold":
+            self.on_hold_feedback(feedback)
+
+    def act(self, env) -> List[Tuple[int, int]]:
+        active_now = sorted(env.active_set)
+
+        if self.phase == "init":
+            self.initialize_control(active_now, env)
+
+        while True:
+            if self.phase in {"transition", "hold"}:
+                return []
+
+            target = self.plan_next_target(active_now, env)
+            if target is None:
+                if self.phase in {"transition", "hold"}:
+                    return []
                 continue
-            feasible.append(pair)
 
-        return feasible
+            normalized_target = self._normalize_target(target)
+            self.current_target = set(normalized_target)
+            self.phase = "transition"
+            return self._propose_replacements_from_target(env, normalized_target)
 
 
-class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
+class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
     """
     Epsilon-greedy for m-of-k selection with decaying epsilon.
 
@@ -159,31 +267,14 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         self.epsilon_min = float(epsilon_min)
         self.schedule = schedule.lower().strip()
         self.decay = float(decay)
+        self.decision_round = 0
+        self.reset()
 
-        self.counts = np.zeros(self.k, dtype=np.int64)
-        self.sums = np.zeros(self.k, dtype=np.float64)
-        self.t = 0  # number of decision rounds taken
-
-    def reset(self) -> None:
-        self.counts.fill(0)
-        self.sums.fill(0.0)
-        self.t = 0
-
-    def update(self, individual_rewards: Dict[int, float]) -> None:
-        for worker_id, r in individual_rewards.items():
-            idx = int(worker_id) - 1
-            if 0 <= idx < self.k:
-                self.counts[idx] += 1
-                self.sums[idx] += float(r)
-
-    def empirical_means(self) -> np.ndarray:
-        means = np.zeros(self.k, dtype=np.float64)
-        mask = self.counts > 0
-        means[mask] = self.sums[mask] / self.counts[mask]
-        return means
+    def reset_policy_state(self) -> None:
+        self.decision_round = 0
 
     def current_epsilon(self) -> float:
-        t = max(1, self.t)
+        t = max(1, self.decision_round)
 
         if self.schedule in {"inverse_sqrt", "inv_sqrt", "sqrt"}:
             eps = self.epsilon0 / math.sqrt(t)
@@ -195,7 +286,7 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         return float(max(self.epsilon_min, min(1.0, eps)))
 
     def compute_target(self) -> List[int]:
-        self.t += 1
+        self.decision_round += 1
         eps_t = self.current_epsilon()
 
         if self.rng.random() < eps_t:
@@ -213,7 +304,7 @@ class EpsilonGreedyHiringPolicy(DelayedActionPolicy):
         return [i + 1 for i in top_idx]
 
 
-class VanillaUCBHiringPolicy(DelayedActionPolicy):
+class VanillaUCBHiringPolicy(EmpiricalDelayedActionPolicy):
     """
     Vanilla UCB for m-of-k semi-bandits.
 
@@ -248,34 +339,17 @@ class VanillaUCBHiringPolicy(DelayedActionPolicy):
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
         self.alpha = float(alpha)
+        self.decision_round = 0
+        self.reset()
 
-        self.counts = np.zeros(self.k, dtype=np.int64)
-        self.sums = np.zeros(self.k, dtype=np.float64)
-        self.t = 0  # number of decision rounds taken
-
-    def reset(self) -> None:
-        self.counts.fill(0)
-        self.sums.fill(0.0)
-        self.t = 0
-
-    def update(self, individual_rewards: Dict[int, float]) -> None:
-        for worker_id, r in individual_rewards.items():
-            idx = int(worker_id) - 1
-            if 0 <= idx < self.k:
-                self.counts[idx] += 1
-                self.sums[idx] += float(r)
-
-    def empirical_means(self) -> np.ndarray:
-        means = np.zeros(self.k, dtype=np.float64)
-        mask = self.counts > 0
-        means[mask] = self.sums[mask] / self.counts[mask]
-        return means
+    def reset_policy_state(self) -> None:
+        self.decision_round = 0
 
     def ucb_scores(self) -> np.ndarray:
         means = self.empirical_means()
         scores = np.empty(self.k, dtype=np.float64)
 
-        logt = math.log(max(self.t, 2))
+        logt = math.log(max(self.decision_round, 2))
         for i in range(self.k):
             n = self.counts[i]
             if n == 0:
@@ -286,7 +360,7 @@ class VanillaUCBHiringPolicy(DelayedActionPolicy):
         return scores
 
     def compute_target(self) -> List[int]:
-        self.t += 1
+        self.decision_round += 1
         scores = self.ucb_scores()
 
         # Random tie-breaking: sort by score then by a shuffled permutation
@@ -311,13 +385,14 @@ class AHTConfig:
     init_pulls: int = 0
 
 
-class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
+class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     """
     Block-allocation policy for multiple plays with switching costs (Agrawal, Hegde, Teneketzis, 1990).
 
     Notes on inheritance:
-    - Inherits k/m/rng validation and storage from DelayedActionPolicy.
-    - Overrides act() because AHT restricts switching to block boundaries and has a transition phase.
+    - Inherits validation, empirical statistics, and the transition/hold lifecycle from
+      StatefulDelayedActionPolicy.
+    - Supplies the AHT-specific warmup, schedule, and block-length logic through hooks.
     """
 
     def __init__(
@@ -357,17 +432,6 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
             init_pulls=int(init_pulls),
         )
 
-        # Empirical stats (semi-bandit feedback)
-        self.counts = np.zeros(self.k, dtype=np.int64)
-        self.sums = np.zeros(self.k, dtype=np.float64)
-
-        # Period counter (stages in the paper)
-        self.t = 0
-
-        # Control state
-        self.phase = "init"  # init -> warmup -> decide -> transition -> block
-        self.current_target: Set[int] = set()
-
         # Block scheduling (frames f and blocks i)
         self.frame_f: int = 0
         self.block_i: int = 0  # 0-based index within the current frame
@@ -377,48 +441,19 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
 
         # Warmup scheduling
         self._warmup_queue: List[int] = []
+        self.reset()
 
     # ----------------------------
-    # Required DelayedActionPolicy API
+    # StatefulDelayedActionPolicy hooks
     # ----------------------------
 
-    def reset(self) -> None:
-        self.counts.fill(0)
-        self.sums.fill(0.0)
-        self.t = 0
-
-        self.phase = "init"
-        self.current_target = set()
-
+    def reset_control_state(self) -> None:
         self.frame_f = 0
         self.block_i = 0
         self.blocks_in_frame = 0
         self.block_len = 0
         self.block_remaining = 0
-
         self._warmup_queue = []
-
-    def update(self, individual_rewards: Dict[int, float]) -> None:
-        observed_active = {int(worker_id) for worker_id in individual_rewards}
-        for worker_id, r in individual_rewards.items():
-            idx = int(worker_id) - 1
-            if 0 <= idx < self.k:
-                self.counts[idx] += 1
-                self.sums[idx] += float(r)
-
-        self.t += 1
-
-        # Count the first target-active reward period as part of the block.
-        if self.phase == "transition" and observed_active == self.current_target:
-            self.phase = "block"
-
-        if self.phase == "block":
-            self.block_remaining -= 1
-            if self.block_remaining <= 0:
-                self._advance_block()
-                self.phase = "decide"
-
-        # transition/warmup accounting is driven by act() + environment state; no-op here.
 
     def compute_target(self) -> List[int]:
         """
@@ -427,50 +462,34 @@ class AgrawalHegdeTeneketzisPolicy(DelayedActionPolicy):
         """
         return sorted(self.current_target)
 
-    # ----------------------------
-    # AHT-specific act() (must override base)
-    # ----------------------------
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
+        self.current_target = set(active_now)
+        self._initialize_schedule()
+        self._initialize_warmup()
+        self.phase = "warmup" if self.cfg.init_pulls > 0 else "ready"
 
-    def act(self, env) -> List[Tuple[int, int]]:
-        active_now = sorted(list(env.active_set))
-
-        if self.phase == "init":
-            self.current_target = set(active_now)
-            self._initialize_schedule()
-            self._initialize_warmup()
-            self.phase = "warmup" if self.cfg.init_pulls > 0 else "decide"
-
+    def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
         if self.phase == "warmup":
             desired = self._warmup_target()
             if desired is None:
-                self.phase = "decide"
-            else:
-                reps = self.bijection(active_now, sorted(desired), rng=self.rng)
-                self.current_target = set(desired)
-                self.phase = "transition"
-                self.block_remaining = 1  # warmup plays exactly one period once active
-                return reps
+                self.phase = "ready"
+                return None
 
-        if self.phase == "decide":
+            self.block_remaining = 1  # warmup plays exactly one period once active
+            return sorted(desired)
+
+        if self.phase == "ready":
             desired = self._choose_set_at_comparison_instant()
-            reps = self.bijection(active_now, sorted(desired), rng=self.rng)
-            self.current_target = set(desired)
-
-            self.phase = "transition"
             self.block_remaining = self.block_len
-            return reps
+            return sorted(desired)
 
-        if self.phase == "transition":
-            # Wait until the chosen set is fully active, then enter the block phase.
-            if set(active_now) == self.current_target:
-                self.phase = "block"
-            return []
+        return None
 
-        if self.phase == "block":
-            # Hold workforce fixed for the remainder of the current block.
-            return []
-
-        return []
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        self.block_remaining -= 1
+        if self.block_remaining <= 0:
+            self._advance_block()
+            self.phase = "ready"
 
     # ----------------------------
     # Estimation primitives

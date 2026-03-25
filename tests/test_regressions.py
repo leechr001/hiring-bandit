@@ -16,6 +16,7 @@ mpl_dir = Path(tempfile.gettempdir()) / "hiringbandit-mpl"
 mpl_dir.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
+from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
 from policies import AgrawalHegdeTeneketzisPolicy
 from simulation import simulate
@@ -67,9 +68,16 @@ class RegressionTests(unittest.TestCase):
         policy.current_target = {1}
         policy.block_remaining = 1
 
-        policy.update({1: 1.0})
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 1.0},
+                active_set=frozenset({1}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
 
-        self.assertEqual(policy.phase, "decide")
+        self.assertEqual(policy.phase, "ready")
 
     def test_hiring_ucb_counts_first_target_active_period_toward_buffer(self) -> None:
         policy = HiringUCBPolicy(
@@ -85,7 +93,14 @@ class RegressionTests(unittest.TestCase):
         policy.i_min_count_at_c = 0
         policy.buffer_threshold_N = 1
 
-        policy.update({1: 1.0})
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 1.0},
+                active_set=frozenset({1}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
 
         self.assertEqual(policy.phase, "ready")
 

@@ -16,7 +16,7 @@ run_c_sweep(
     k=k,
     m=m,
     T=T,
-    policy_name='hiring-ucb-gamma-1',
+    policy_name='optimistic-hire-gamma-1',
     means=means,
     c_values=c_values,
     omega_max=omega_max,
@@ -27,10 +27,9 @@ run_c_sweep(
     k=k,
     m=m,
     T=T,
-    policy_name='hiring-ucb-gamma-2',
+    policy_name='optimistic-hire-gamma-2',
     means=means,
     c_values=c_values,
     omega_max=omega_max,
     n_runs=20,
 )
-
