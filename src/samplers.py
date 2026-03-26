@@ -1,3 +1,4 @@
+import math
 import random
 from typing import Optional, Sequence, Tuple
 
@@ -12,6 +13,92 @@ def make_bernoulli_samplers(means: Sequence[float], rng: random.Random):
     def sampler(p):
         return lambda: 1.0 if rng.random() < p else 0.0
     return [sampler(p) for p in means]
+
+
+def _normal_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _truncated_normal_mean(
+    location: float,
+    *,
+    stddev: float,
+    lower: float,
+    upper: float,
+) -> float:
+    alpha = (lower - location) / stddev
+    beta = (upper - location) / stddev
+    z = _normal_cdf(beta) - _normal_cdf(alpha)
+    if z <= 0.0:
+        raise ValueError("Truncated normal normalization constant must be positive.")
+    return location + stddev * (_normal_pdf(alpha) - _normal_pdf(beta)) / z
+
+
+def _calibrate_truncated_normal_location(
+    target_mean: float,
+    *,
+    stddev: float,
+    lower: float,
+    upper: float,
+) -> float:
+    if not (lower <= target_mean <= upper):
+        raise ValueError("Each truncated-normal mean must lie within [lower, upper].")
+
+    lo = lower - 12.0 * stddev
+    hi = upper + 12.0 * stddev
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if _truncated_normal_mean(mid, stddev=stddev, lower=lower, upper=upper) < target_mean:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def make_truncated_normal_samplers(
+    means: Sequence[float],
+    rng: random.Random,
+    *,
+    stddev: float = 0.1,
+    lower: float = 0.0,
+    upper: float = 1.0,
+):
+    """
+    Generate reward samplers from truncated normal distributions on [lower, upper].
+
+    The provided ``means`` are treated as the desired expected rewards. Each arm's
+    underlying normal location is calibrated so the truncated distribution matches
+    that mean up to numerical tolerance.
+    """
+    if stddev <= 0.0:
+        raise ValueError("stddev must be positive.")
+    if lower >= upper:
+        raise ValueError("Require lower < upper for truncated normal rewards.")
+
+    locations = [
+        _calibrate_truncated_normal_location(
+            float(mean),
+            stddev=stddev,
+            lower=lower,
+            upper=upper,
+        )
+        for mean in means
+    ]
+
+    def sampler(location: float):
+        def draw() -> float:
+            while True:
+                sample = rng.gauss(location, stddev)
+                if lower <= sample <= upper:
+                    return float(sample)
+
+        return draw
+
+    return [sampler(location) for location in locations]
 
 def make_uniform_delay_sampler(omega_max: int, rng=None):
     """

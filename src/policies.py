@@ -247,7 +247,7 @@ class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
         bijection_name: str = 'random',
         *,
         schedule: str = "inverse_sqrt",
-        epsilon_min: float = 0.01,
+        epsilon_min: float = 0,
         decay: float = 0.999,
         rng: Optional[random.Random] = None,
         # keep compatibility with DelayedActionPolicy signature if needed:
@@ -293,6 +293,7 @@ class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
             return self.rng.sample(list(range(1, self.k + 1)), self.m)
 
         means = self.empirical_means()
+        means[self.counts == 0] = float("inf")
 
         # Random tie-breaking via permutation
         perm = list(range(self.k))
@@ -388,7 +389,7 @@ class Threshold(EmpiricalDelayedActionPolicy):
         self,
         k: int,
         m: int,
-        threshold: float = 0.5,
+        threshold: float = 1,
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         c: float = 0.0,

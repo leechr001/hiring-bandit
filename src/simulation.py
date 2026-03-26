@@ -11,6 +11,7 @@ from samplers import (
     make_bernoulli_samplers, 
     make_calendar_adversarial_delay,
     make_calendar_delay_sampler,
+    make_truncated_normal_samplers,
     make_uniform_delay_sampler, 
     make_adversarial_delay
 )
@@ -18,6 +19,7 @@ from samplers import (
 from dataclasses import dataclass, field
 import math
 import random
+import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -110,6 +112,34 @@ def make_delay_sampler_factory(
         "'stochastic', 'iid', 'adversarial', 'wc', 'calendar', "
         "'calendar-unif', 'calendar-geom', 'calendar-adversarial', "
         "or 'calendar-wc'."
+    )
+
+
+def make_reward_sampler_factory(
+    reward_process_name: str,
+    *,
+    means: Sequence[float],
+    reward_stddev: float = 0.1,
+    reward_lower: float = 0.0,
+    reward_upper: float = 1.0,
+) -> Callable[[int], Sequence[Callable]]:
+    if reward_process_name in {"bernoulli", "binary"}:
+        return lambda seed: make_bernoulli_samplers(
+            means,
+            _seeded_rng(seed, "reward"),
+        )
+    if reward_process_name in {"truncated-normal", "truncnorm", "tn"}:
+        return lambda seed: make_truncated_normal_samplers(
+            means,
+            _seeded_rng(seed, "reward"),
+            stddev=reward_stddev,
+            lower=reward_lower,
+            upper=reward_upper,
+        )
+
+    raise ValueError(
+        "reward_process_name must be one of: 'bernoulli', 'binary', "
+        "'truncated-normal', 'truncnorm', or 'tn'."
     )
 
 
@@ -511,7 +541,7 @@ def make_policy(
 
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
-      - "threshold"
+      - "threshold", "threshold-n"
       - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
       - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
@@ -522,8 +552,11 @@ def make_policy(
     if name in {"eps", "epsilon", "epsilon-greedy", "egreedy"}:
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
 
-    elif name in {"threshold"}:
+    elif name == "threshold":
         return Threshold(k=k, m=m, threshold=threshold, rng=rng)
+    elif threshold_match := re.fullmatch(r"threshold-([0-9]*\.?[0-9]+)", name):
+        parsed_threshold = float(threshold_match.group(1))
+        return Threshold(k=k, m=m, threshold=parsed_threshold, rng=rng)
 
     elif name in {
         "omm",
@@ -651,6 +684,10 @@ def simulate(
     delay_sampler: Optional[Callable] = None,
     reward_sampler_factory: Optional[Callable[[int], Sequence[Callable]]] = None,
     delay_sampler_factory: Optional[Callable[[int], Callable]] = None,
+    reward_process_name: str = "bernoulli",
+    reward_stddev: float = 0.1,
+    reward_lower: float = 0.0,
+    reward_upper: float = 1.0,
     epsilon: float = 0.1,
     threshold: float = 0.5,
     gamma: float | str = 0.5,
@@ -671,9 +708,12 @@ def simulate(
         means = sorted([rng.uniform(0.1, 0.9) for _ in range(k)], reverse=True)
     
     if reward_samplers is None and reward_sampler_factory is None:
-        reward_sampler_factory = lambda seed: make_bernoulli_samplers(
-            means,
-            _seeded_rng(seed, "reward"),
+        reward_sampler_factory = make_reward_sampler_factory(
+            reward_process_name,
+            means=means,
+            reward_stddev=reward_stddev,
+            reward_lower=reward_lower,
+            reward_upper=reward_upper,
         )
     
     if delay_sampler is None and delay_sampler_factory is None:

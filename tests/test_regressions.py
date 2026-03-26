@@ -20,10 +20,15 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
 from policies import AgrawalHegdeTeneketzisPolicy, Threshold
-from samplers import make_calendar_adversarial_delay, make_calendar_delay_sampler
+from samplers import (
+    make_calendar_adversarial_delay,
+    make_calendar_delay_sampler,
+    make_truncated_normal_samplers,
+)
 from simulation import (
     _average_regret_results,
     make_delay_sampler_factory,
+    make_reward_sampler_factory,
     compute_optimistic_hire_auto_gamma,
     make_policy,
     optimistic_hire_regret_bound,
@@ -288,6 +293,51 @@ class RegressionTests(unittest.TestCase):
         replacements = policy.act(self._StaticEnv({1, 2}))
 
         self.assertEqual(replacements, [(1, 3)])
+
+    def test_threshold_policy_name_can_encode_threshold_value(self) -> None:
+        policy = make_policy(
+            "threshold-0.75",
+            k=4,
+            m=2,
+            T=10,
+            c=0.0,
+            omega_max=1,
+            rng=random.Random(0),
+        )
+
+        self.assertIsInstance(policy, Threshold)
+        assert isinstance(policy, Threshold)
+        self.assertAlmostEqual(policy.threshold, 0.75)
+
+    def test_truncated_normal_samplers_are_bounded_and_match_target_mean(self) -> None:
+        sampler = make_truncated_normal_samplers(
+            [0.75],
+            random.Random(0),
+            stddev=0.1,
+            lower=0.0,
+            upper=1.0,
+        )[0]
+
+        draws = np.asarray([sampler() for _ in range(4000)], dtype=np.float64)
+
+        self.assertTrue(np.all(draws >= 0.0))
+        self.assertTrue(np.all(draws <= 1.0))
+        self.assertAlmostEqual(float(draws.mean()), 0.75, delta=0.03)
+
+    def test_reward_sampler_factory_supports_truncated_normal(self) -> None:
+        factory = make_reward_sampler_factory(
+            "truncated-normal",
+            means=[0.25],
+            reward_stddev=0.08,
+            reward_lower=0.0,
+            reward_upper=1.0,
+        )
+        sampler = factory(3)[0]
+
+        draws = np.asarray([sampler() for _ in range(3000)], dtype=np.float64)
+        self.assertTrue(np.all(draws >= 0.0))
+        self.assertTrue(np.all(draws <= 1.0))
+        self.assertAlmostEqual(float(draws.mean()), 0.25, delta=0.03)
 
 
 if __name__ == "__main__":
