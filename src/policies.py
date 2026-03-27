@@ -380,9 +380,8 @@ class Threshold(EmpiricalDelayedActionPolicy):
 
     The policy keeps the current workforce until one or more active workers with
     observations have empirical mean below a fixed threshold. Those workers are
-    replaced by previously untried workers when available. Once every worker has
-    been tried at least once, the policy falls back to choosing the top-m workers
-    by empirical mean each period.
+    replaced by the highest-scoring available workers, where untried workers are
+    treated as having empirical mean +inf.
     """
 
     def __init__(
@@ -407,28 +406,26 @@ class Threshold(EmpiricalDelayedActionPolicy):
         self._active_snapshot = sorted(int(worker_id) for worker_id in env.active_set)
         return super().act(env)
 
-    def _top_empirical_team(self) -> List[int]:
+    def _available_worker_scores(self, active: Sequence[int]) -> List[int]:
         means = self.empirical_means()
+        scores = means.copy()
+        scores[self.counts == 0] = float("inf")
+
         perm = list(range(self.k))
         self.rng.shuffle(perm)
-        perm_means = [(means[i], i) for i in perm]
+        perm_means = [
+            (scores[i], i)
+            for i in perm
+            if (i + 1) not in active
+        ]
         perm_means.sort(key=lambda x: x[0], reverse=True)
-        top_idx = [i for _, i in perm_means[: self.m]]
+        top_idx = [i for _, i in perm_means]
         return [i + 1 for i in top_idx]
 
     def compute_target(self) -> List[int]:
         active = list(self._active_snapshot)
         if len(active) != self.m:
             raise RuntimeError("Threshold.act() must be called with the current environment.")
-
-        untried = [
-            worker_id
-            for worker_id in range(1, self.k + 1)
-            if self.counts[worker_id - 1] == 0 and worker_id not in active
-        ]
-
-        if not untried:
-            return self._top_empirical_team()
 
         means = self.empirical_means()
         below_threshold = [
@@ -439,13 +436,231 @@ class Threshold(EmpiricalDelayedActionPolicy):
         if not below_threshold:
             return active
 
-        self.rng.shuffle(untried)
+        best_available = self._available_worker_scores(active)
         target = set(active)
-        for remove_id, add_id in zip(below_threshold, untried):
+        for remove_id, add_id in zip(below_threshold, best_available):
             target.discard(remove_id)
             target.add(add_id)
 
         return sorted(target)
+
+
+class SemiAnnualReview(StatefulDelayedActionPolicy):
+    """
+    Periodic review policy that reselects the workforce on a fixed review cadence.
+
+    The policy holds the current workforce between reviews. At each review time it
+    selects the top-m workers by empirical mean, treating untried workers as having
+    score +inf so they are explored when available.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        review_interval: int = 6 * 30 * 24,
+        bijection_name: str = 'random',
+        rng: Optional[random.Random] = None,
+        c: float = 0.0,
+        omega_max: int = 0,
+    ) -> None:
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        if review_interval <= 0:
+            raise ValueError("review_interval must be positive.")
+        self.review_interval = int(review_interval)
+        self.next_review_time = self.review_interval
+        self.reset()
+
+    def reset_control_state(self) -> None:
+        self.next_review_time = self.review_interval
+
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
+        self.current_target = set(active_now)
+        self.phase = "hold"
+
+    def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
+        if self.phase != "ready":
+            return None
+        return self.compute_target()
+
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        if self.t >= self.next_review_time:
+            self.next_review_time += self.review_interval
+            self.phase = "ready"
+
+    def compute_target(self) -> List[int]:
+        means = self.empirical_means()
+        scores = means.copy()
+        scores[self.counts == 0] = float("inf")
+
+        perm = list(range(self.k))
+        self.rng.shuffle(perm)
+        ranked = [(scores[i], i) for i in perm]
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        top_idx = [i for _, i in ranked[: self.m]]
+        return [i + 1 for i in top_idx]
+
+
+class WorkTrial(StatefulDelayedActionPolicy):
+    """
+    Work-trial policy with an initial short trial and two fixed review blocks.
+
+    Stage 1:
+      - Give every worker a short trial of ``trial_periods`` active periods.
+    Stage 2:
+      - Select the top-2m workers by empirical mean.
+      - Hold the first m for ``rotation_periods`` periods.
+      - Then hold the second m for ``rotation_periods`` periods.
+    Stage 3:
+      - Permanently retain the empirically best m workers.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        trial_periods: int = 1,
+        rotation_periods: int = 90 * 24,
+        bijection_name: str = 'random',
+        rng: Optional[random.Random] = None,
+        c: float = 0.0,
+        omega_max: int = 0,
+    ) -> None:
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        if trial_periods <= 0:
+            raise ValueError("trial_periods must be positive.")
+        if rotation_periods <= 0:
+            raise ValueError("rotation_periods must be positive.")
+        self.trial_periods = int(trial_periods)
+        self.rotation_periods = int(rotation_periods)
+        self.stage = "trial"
+        self.required_trial_workers: Set[int] = set()
+        self.trial_baselines: Dict[int, int] = {}
+        self.shortlist: List[int] = []
+        self.block_elapsed = 0
+        self._active_snapshot: List[int] = []
+        self.reset()
+
+    def reset_control_state(self) -> None:
+        self.stage = "trial"
+        self.required_trial_workers = set()
+        self.trial_baselines = {}
+        self.shortlist = []
+        self.block_elapsed = 0
+        self._active_snapshot = []
+
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
+        self._active_snapshot = list(active_now)
+        self.current_target = set(active_now)
+        self.required_trial_workers = set(active_now)
+        self.trial_baselines = {
+            worker_id: int(self.counts[worker_id - 1])
+            for worker_id in active_now
+        }
+        self.stage = "trial"
+        self.phase = "hold"
+
+    def _rank_workers(self, *, treat_untried_as_infinite: bool = False) -> List[int]:
+        means = self.empirical_means()
+        scores = means.copy()
+        if treat_untried_as_infinite:
+            scores[self.counts == 0] = float("inf")
+
+        perm = list(range(self.k))
+        self.rng.shuffle(perm)
+        ranked = [(scores[i], i) for i in perm]
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        return [i + 1 for _, i in ranked]
+
+    def _next_trial_target(self, active_now: Sequence[int]) -> List[int]:
+        remaining_untried = [
+            worker_id
+            for worker_id in range(1, self.k + 1)
+            if self.counts[worker_id - 1] == 0 and worker_id not in active_now
+        ]
+
+        if len(remaining_untried) >= self.m:
+            target = remaining_untried[: self.m]
+        else:
+            fillers = [worker_id for worker_id in active_now if worker_id not in remaining_untried]
+            target = remaining_untried + fillers[: self.m - len(remaining_untried)]
+
+        self.required_trial_workers = {
+            worker_id
+            for worker_id in target
+            if self.counts[worker_id - 1] == 0
+        }
+        self.trial_baselines = {
+            worker_id: int(self.counts[worker_id - 1])
+            for worker_id in target
+        }
+        return sorted(target)
+
+    def _set_shortlist(self) -> None:
+        ranked = self._rank_workers()
+        shortlist_size = min(self.k, 2 * self.m)
+        self.shortlist = ranked[:shortlist_size]
+
+    def _first_block_target(self) -> List[int]:
+        return list(self.shortlist[: self.m])
+
+    def _second_block_target(self) -> List[int]:
+        second = list(self.shortlist[self.m : self.m + self.m])
+        if len(second) < self.m:
+            for worker_id in self.shortlist:
+                if worker_id not in second:
+                    second.append(worker_id)
+                if len(second) == self.m:
+                    break
+        return second
+
+    def _final_target(self) -> List[int]:
+        return self._rank_workers()[: self.m]
+
+    def compute_target(self) -> List[int]:
+        if self.stage == "trial":
+            return self._next_trial_target(self._active_snapshot)
+        if self.stage == "first_block":
+            self.block_elapsed = 0
+            return self._first_block_target()
+        if self.stage == "second_block":
+            self.block_elapsed = 0
+            return self._second_block_target()
+        if self.stage == "final":
+            return self._final_target()
+        return list(self._active_snapshot)
+
+    def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
+        if self.phase != "ready":
+            return None
+        self._active_snapshot = list(active_now)
+        return self.compute_target()
+
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        if self.stage == "trial":
+            if all(
+                int(self.counts[worker_id - 1]) - self.trial_baselines.get(worker_id, 0) >= self.trial_periods
+                for worker_id in self.required_trial_workers
+            ):
+                remaining_untried = any(self.counts[i] == 0 for i in range(self.k))
+                if remaining_untried:
+                    self.phase = "ready"
+                else:
+                    self._set_shortlist()
+                    self.stage = "first_block"
+                    self.phase = "ready"
+            return
+
+        if self.stage in {"first_block", "second_block"}:
+            self.block_elapsed += 1
+            if self.block_elapsed >= self.rotation_periods:
+                if self.stage == "first_block":
+                    self.stage = "second_block"
+                    self.phase = "ready"
+                else:
+                    self.stage = "final"
+                    self.phase = "ready"
+
 
 @dataclass(frozen=True)
 class AHTConfig:

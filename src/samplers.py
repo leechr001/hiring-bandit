@@ -100,15 +100,24 @@ def make_truncated_normal_samplers(
 
     return [sampler(location) for location in locations]
 
-def make_uniform_delay_sampler(omega_max: int, rng=None):
+def make_uniform_delay_sampler(
+    omega_max: int,
+    rng=None,
+    *,
+    delay_lower: int = 1,
+):
     """
     Generates delay completion times as iid uniform process.
     """
+    if delay_lower < 1:
+        raise ValueError("delay_lower must be >= 1.")
+    if delay_lower > omega_max:
+        raise ValueError("delay_lower must be <= omega_max.")
     rng = rng or random.Random()
 
     # iid so pair and t are not used.
     def sampler(pair: Tuple[int, int], t: int) -> int:
-        return rng.randint(1, omega_max)
+        return rng.randint(delay_lower, omega_max)
     return sampler
 
 

@@ -6,6 +6,7 @@ venv/
 
 # Packaging/build artifacts
 *.egg-info/
+artifacts/
 
 # OS/editor
 .DS_Store

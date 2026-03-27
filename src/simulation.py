@@ -2,7 +2,9 @@ from bandit_environment import TemporaryHiringBanditEnv
 from policies import (
     EpsilonGreedyHiringPolicy,
     OMM,
+    SemiAnnualReview,
     Threshold,
+    WorkTrial,
     AgrawalHegdeTeneketzisPolicy
 )
 
@@ -66,14 +68,16 @@ def make_delay_sampler_factory(
     *,
     means: Sequence[float],
     omega_max: int,
+    delay_lower: int = 1,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
 ) -> Callable[[int], Callable]:
     if delay_process_name in {"uniform", "random", "stochastic", "iid"}:
         return lambda seed: make_uniform_delay_sampler(
-            omega_max,
-            _seeded_rng(seed, "delay"),
+            omega_max=omega_max,
+            rng=_seeded_rng(seed, "delay"),
+            delay_lower=delay_lower,
         )
     if delay_process_name in {"adversarial", "wc"}:
         return lambda seed: make_adversarial_delay(
@@ -185,6 +189,29 @@ def _average_regret_results(
     return averaged
 
 
+def _default_series_style(index: int) -> Dict[str, Any]:
+    colors = [
+        "#1f77b4",
+        "#d62728",
+        "#2ca02c",
+        "#ff7f0e",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+    ]
+    linestyles = ["-", "--", "-.", ":"]
+    markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+    return {
+        "color": colors[index % len(colors)],
+        "linestyle": linestyles[index % len(linestyles)],
+        "marker": markers[index % len(markers)],
+        "markevery": 0.08,
+        "linewidth": 2,
+        "markersize": 5,
+    }
+
+
 def plot_regret_series(
     *,
     series: Sequence[ExperimentSeries],
@@ -195,6 +222,7 @@ def plot_regret_series(
     figure_kwargs: Optional[Mapping[str, Any]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     grid_kwargs: Optional[Mapping[str, Any]] = None,
+    save_path: Optional[str] = None,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     if precomputed is None:
@@ -207,16 +235,18 @@ def plot_regret_series(
 
     plt.figure(**dict(figure_kwargs or {}))
 
-    for spec in series:
+    for idx, spec in enumerate(series):
         label = spec.label or spec.policy_name
         mean_curve, std_curve = results[label]
-        line_kwargs = dict(spec.plot_kwargs)
+        line_kwargs = _default_series_style(idx)
+        line_kwargs.update(dict(spec.plot_kwargs))
         plt.plot(x, mean_curve, label=label, **line_kwargs)
         plt.fill_between(
             x,
             mean_curve - std_curve,
             mean_curve + std_curve,
             alpha=spec.band_alpha,
+            color=line_kwargs.get("color"),
         )
 
     plt.xlabel(xlabel)
@@ -231,6 +261,8 @@ def plot_regret_series(
     plt.grid(True, **merged_grid_kwargs)
     plt.legend()
     plt.tight_layout()
+    if save_path is not None:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
 
     return means, results
@@ -240,12 +272,13 @@ def plot_average_regret_series(
     *,
     series: Sequence[ExperimentSeries],
     simulate_kwargs: Mapping[str, Any],
-    title: str = "Normalized Pseudo-Regret by Policy",
+    title: str = "Normalized Loss by Policy",
     xlabel: str = "Time t",
-    ylabel: str = r"Normalized pseudo-regret $R(t) / (t\,\mu(A^*))$",
+    ylabel: str = r"Normalized loss",
     figure_kwargs: Optional[Mapping[str, Any]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     grid_kwargs: Optional[Mapping[str, Any]] = None,
+    save_path: Optional[str] = None,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     if precomputed is None:
@@ -267,9 +300,89 @@ def plot_average_regret_series(
         figure_kwargs=figure_kwargs,
         ylim=ylim,
         grid_kwargs=grid_kwargs,
+        save_path=save_path,
         precomputed=(means, averaged_results),
     )
     return means, averaged_results
+
+
+def build_planning_horizon_regret_table(
+    *,
+    series: Sequence[ExperimentSeries],
+    means: Sequence[float],
+    m: int,
+    results: Mapping[str, Tuple[np.ndarray, np.ndarray]],
+    horizons: Sequence[Tuple[str, int]],
+) -> Sequence[Dict[str, Any]]:
+    normalized_results = _average_regret_results(means, m, results)
+    rows: list[Dict[str, Any]] = []
+
+    for horizon_label, horizon_period in horizons:
+        row: Dict[str, Any] = {
+            "horizon": horizon_label,
+            "period": horizon_period,
+        }
+        for spec in series:
+            label = spec.label or spec.policy_name
+            mean_curve, _ = results[label]
+            norm_curve, _ = normalized_results[label]
+
+            if horizon_period < 1 or horizon_period > len(mean_curve):
+                row[f"{label} cumulative"] = None
+                row[f"{label} normalized"] = None
+                continue
+
+            idx = horizon_period - 1
+            row[f"{label} cumulative"] = float(mean_curve[idx])
+            row[f"{label} normalized"] = float(norm_curve[idx])
+        rows.append(row)
+
+    return rows
+
+
+def print_planning_horizon_regret_table(
+    *,
+    series: Sequence[ExperimentSeries],
+    means: Sequence[float],
+    m: int,
+    results: Mapping[str, Tuple[np.ndarray, np.ndarray]],
+    horizons: Sequence[Tuple[str, int]],
+) -> Sequence[Dict[str, Any]]:
+    rows = build_planning_horizon_regret_table(
+        series=series,
+        means=means,
+        m=m,
+        results=results,
+        horizons=horizons,
+    )
+
+    header = ["Horizon"]
+    for spec in series:
+        label = spec.label or spec.policy_name
+        header.extend([f"{label} Regret", f"{label} Loss %"])
+
+    table: list[list[str]] = [header]
+    for row in rows:
+        formatted = [str(row["horizon"])]
+        for spec in series:
+            label = spec.label or spec.policy_name
+            cumulative = row[f"{label} cumulative"]
+            normalized = row[f"{label} normalized"]
+            formatted.append("n/a" if cumulative is None else f"{float(cumulative):,.1f}")
+            formatted.append("n/a" if normalized is None else f"{100.0 * float(normalized):.2f}%")
+        table.append(formatted)
+
+    widths = [
+        max(len(row[col_idx]) for row in table)
+        for col_idx in range(len(table[0]))
+    ]
+    for row_idx, row in enumerate(table):
+        line = " | ".join(value.ljust(widths[idx]) for idx, value in enumerate(row))
+        print(line)
+        if row_idx == 0:
+            print("-+-".join("-" * width for width in widths))
+
+    return rows
 
 
 def evaluate_final_regret_sweep(
@@ -532,6 +645,9 @@ def make_policy(
     omega_max: int,
     rng: random.Random,
     epsilon: float = 0.1,
+    review_interval: int = 6 * 30 * 24,
+    work_trial_periods: int = 1,
+    work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
     ucb_coef: float = 2.0,
     gamma: float | str = 0.5,
@@ -541,6 +657,8 @@ def make_policy(
 
     Supported names (case- and spacing-insensitive after lowercasing/stripping):
       - "epsilon-greedy", "eps", "epsilon", "egreedy"
+      - "semiannualreview", "semiannual-review", "semi-annual-review"
+      - "worktrial", "work-trial"
       - "threshold", "threshold-n"
       - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
       - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
@@ -551,6 +669,18 @@ def make_policy(
     # Naive baselines
     if name in {"eps", "epsilon", "epsilon-greedy", "egreedy"}:
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
+
+    elif name in {"semiannualreview", "semiannual-review", "semi-annual-review"}:
+        return SemiAnnualReview(k=k, m=m, review_interval=review_interval, rng=rng)
+
+    elif name in {"worktrial", "work-trial"}:
+        return WorkTrial(
+            k=k,
+            m=m,
+            trial_periods=work_trial_periods,
+            rotation_periods=work_trial_rotation_periods,
+            rng=rng,
+        )
 
     elif name == "threshold":
         return Threshold(k=k, m=m, threshold=threshold, rng=rng)
@@ -615,6 +745,9 @@ def run_episode(
     delay_sampler: Callable,
     T: int,
     epsilon: float,
+    review_interval: int,
+    work_trial_periods: int,
+    work_trial_rotation_periods: int,
     threshold: float,
     gamma: float | str,
     c: float,
@@ -646,6 +779,9 @@ def run_episode(
         omega_max=omega_max,
         rng=rng,
         epsilon=epsilon,
+        review_interval=review_interval,
+        work_trial_periods=work_trial_periods,
+        work_trial_rotation_periods=work_trial_rotation_periods,
         threshold=threshold,
         ucb_coef=2.0,  # adjust if you want different default exploration strength
         gamma=gamma
@@ -688,7 +824,11 @@ def simulate(
     reward_stddev: float = 0.1,
     reward_lower: float = 0.0,
     reward_upper: float = 1.0,
+    delay_lower: int = 1,
     epsilon: float = 0.1,
+    review_interval: int = 6 * 30 * 24,
+    work_trial_periods: int = 1,
+    work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
     gamma: float | str = 0.5,
     c: float = 1,
@@ -718,8 +858,9 @@ def simulate(
     
     if delay_sampler is None and delay_sampler_factory is None:
         delay_sampler_factory = lambda seed: make_uniform_delay_sampler(
-            omega_max,
-            _seeded_rng(seed, "delay"),
+            omega_max=omega_max,
+            rng=_seeded_rng(seed, "delay"),
+            delay_lower=delay_lower,
         )
 
     results: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -750,6 +891,9 @@ def simulate(
                     delay_sampler=episode_delay_sampler,
                     T=T,
                     epsilon=epsilon,
+                    review_interval=review_interval,
+                    work_trial_periods=work_trial_periods,
+                    work_trial_rotation_periods=work_trial_rotation_periods,
                     threshold=threshold,
                     gamma=gamma,
                     c=c,
@@ -778,6 +922,7 @@ def run_policy_comparisons(
     omega_max: int,
     means: Sequence[float],
     delay_process_name: str = 'uniform',
+    delay_lower: int = 1,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -793,6 +938,7 @@ def run_policy_comparisons(
         delay_process_name,
         means=means,
         omega_max=omega_max,
+        delay_lower=delay_lower,
         calendar_frequency=calendar_frequency,
         calendar_distribution=calendar_distribution,
         calendar_geom_p=calendar_geom_p,

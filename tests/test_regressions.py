@@ -19,14 +19,17 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
 from bandit_environment import StepFeedback
 from hiring_ucb import HiringUCBPolicy
-from policies import AgrawalHegdeTeneketzisPolicy, Threshold
+from policies import AgrawalHegdeTeneketzisPolicy, SemiAnnualReview, Threshold, WorkTrial
 from samplers import (
     make_calendar_adversarial_delay,
     make_calendar_delay_sampler,
     make_truncated_normal_samplers,
+    make_uniform_delay_sampler,
 )
 from simulation import (
     _average_regret_results,
+    build_planning_horizon_regret_table,
+    ExperimentSeries,
     make_delay_sampler_factory,
     make_reward_sampler_factory,
     compute_optimistic_hire_auto_gamma,
@@ -208,6 +211,17 @@ class RegressionTests(unittest.TestCase):
             delay = factory_sampler((1, 2), 8)
             self.assertIn(delay, {8, 16})
 
+    def test_uniform_delay_sampler_can_use_positive_lower_bound(self) -> None:
+        sampler = make_uniform_delay_sampler(
+            6,
+            random.Random(0),
+            delay_lower=3,
+        )
+        draws = [sampler((1, 2), 1) for _ in range(200)]
+
+        self.assertGreaterEqual(min(draws), 3)
+        self.assertLessEqual(max(draws), 6)
+
     def test_calendar_delay_sampler_geom_prefers_earlier_feasible_periods(self) -> None:
         sampler = make_calendar_delay_sampler(
             20,
@@ -276,7 +290,7 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(replacements, [(1, 3)])
 
-    def test_threshold_policy_falls_back_to_top_empirical_team_after_all_workers_tried(self) -> None:
+    def test_threshold_policy_uses_best_available_worker_after_all_workers_tried(self) -> None:
         policy = make_policy(
             "threshold",
             k=4,
@@ -308,6 +322,126 @@ class RegressionTests(unittest.TestCase):
         self.assertIsInstance(policy, Threshold)
         assert isinstance(policy, Threshold)
         self.assertAlmostEqual(policy.threshold, 0.75)
+
+    def test_make_policy_builds_semiannual_review_with_custom_interval(self) -> None:
+        policy = make_policy(
+            "SemiAnnualReview",
+            k=4,
+            m=2,
+            T=10,
+            c=0.0,
+            omega_max=1,
+            rng=random.Random(0),
+            review_interval=12,
+        )
+
+        self.assertIsInstance(policy, SemiAnnualReview)
+        assert isinstance(policy, SemiAnnualReview)
+        self.assertEqual(policy.review_interval, 12)
+
+    def test_semiannual_review_reselects_team_on_review_schedule(self) -> None:
+        policy = SemiAnnualReview(k=3, m=1, review_interval=2, rng=random.Random(0))
+
+        self.assertEqual(policy.act(self._StaticEnv({1})), [])
+        self.assertEqual(policy.phase, "hold")
+
+        policy.counts[:] = np.asarray([5, 5, 5], dtype=np.int64)
+        policy.sums[:] = np.asarray([2.0, 4.5, 4.8], dtype=np.float64)
+
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 0.0},
+                active_set=frozenset({1}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.phase, "hold")
+
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 0.0},
+                active_set=frozenset({1}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.phase, "ready")
+
+        replacements = policy.act(self._StaticEnv({1}))
+        self.assertEqual(replacements, [(1, 3)])
+
+    def test_make_policy_builds_work_trial_with_custom_schedule(self) -> None:
+        policy = make_policy(
+            "WorkTrial",
+            k=4,
+            m=2,
+            T=10,
+            c=0.0,
+            omega_max=1,
+            rng=random.Random(0),
+            work_trial_periods=2,
+            work_trial_rotation_periods=7,
+        )
+
+        self.assertIsInstance(policy, WorkTrial)
+        assert isinstance(policy, WorkTrial)
+        self.assertEqual(policy.trial_periods, 2)
+        self.assertEqual(policy.rotation_periods, 7)
+
+    def test_work_trial_moves_from_trial_stage_to_first_block(self) -> None:
+        policy = WorkTrial(k=4, m=1, trial_periods=1, rotation_periods=2, rng=random.Random(0))
+
+        self.assertEqual(policy.act(self._StaticEnv({1})), [])
+        self.assertEqual(policy.stage, "trial")
+
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 1.0},
+                active_set=frozenset({1}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.phase, "ready")
+
+        replacements = policy.act(self._StaticEnv({1}))
+        self.assertEqual(replacements, [(1, 2)])
+
+        policy.current_target = {2}
+        policy.phase = "transition"
+        policy.update(
+            StepFeedback(
+                individual_rewards={2: 1.0},
+                active_set=frozenset({2}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.phase, "ready")
+
+        replacements = policy.act(self._StaticEnv({2}))
+        self.assertEqual(replacements, [(2, 3)])
+
+    def test_build_planning_horizon_regret_table_uses_precomputed_results(self) -> None:
+        rows = build_planning_horizon_regret_table(
+            series=[ExperimentSeries(policy_name="omm", label="OMM")],
+            means=[0.9, 0.8, 0.1],
+            m=2,
+            results={
+                "OMM": (
+                    np.asarray([2.0, 6.0, 12.0], dtype=np.float64),
+                    np.asarray([1.0, 3.0, 6.0], dtype=np.float64),
+                )
+            },
+            horizons=[("Month 1", 2), ("Year 1", 4)],
+        )
+
+        self.assertEqual(rows[0]["horizon"], "Month 1")
+        self.assertAlmostEqual(float(rows[0]["OMM cumulative"]), 6.0)
+        self.assertAlmostEqual(float(rows[0]["OMM normalized"]), 3.0 / 1.7)
+        self.assertIsNone(rows[1]["OMM cumulative"])
+        self.assertIsNone(rows[1]["OMM normalized"])
 
     def test_truncated_normal_samplers_are_bounded_and_match_target_mean(self) -> None:
         sampler = make_truncated_normal_samplers(
