@@ -446,6 +446,7 @@ def plot_final_regret_sweep(
         "linewidth": 1,
         "capsize": 2,
         "label": "Average final cumulative regret",
+        "zorder": 2,
     }
     if errorbar_kwargs:
         base_errorbar_kwargs.update(dict(errorbar_kwargs))
@@ -467,6 +468,7 @@ def plot_final_regret_sweep(
             "edgecolor": "black",
             "linewidth": 1.5,
             "label": point.label,
+            "zorder": 5,
         }
         point_kwargs.update(dict(point.plot_kwargs))
         plt.scatter(
