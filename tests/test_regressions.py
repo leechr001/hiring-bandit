@@ -18,7 +18,7 @@ mpl_dir.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
 from bandit_environment import StepFeedback
-from hiring_ucb import HiringUCBPolicy
+from optimistic_hire import OptimisticHire
 from policies import AgrawalHegdeTeneketzisPolicy, SemiAnnualReview, Threshold, WorkTrial
 from samplers import (
     make_calendar_adversarial_delay,
@@ -89,6 +89,26 @@ class RegressionTests(unittest.TestCase):
             results_ba["epsilon-greedy"][1],
         )
 
+    def test_simulate_parallel_matches_sequential_for_builtin_processes(self) -> None:
+        kwargs = {
+            "policies": ["omm", "optimistic-hire"],
+            "k": 5,
+            "m": 2,
+            "T": 20,
+            "means": [0.9, 0.8, 0.5, 0.3, 0.1],
+            "omega_max": 2,
+            "c": 1.0,
+            "n_runs": 2,
+            "seed0": 11,
+        }
+
+        _, sequential = simulate(n_jobs=1, **kwargs)
+        _, parallel = simulate(n_jobs=2, **kwargs)
+
+        for policy_name in kwargs["policies"]:
+            np.testing.assert_allclose(sequential[policy_name][0], parallel[policy_name][0])
+            np.testing.assert_allclose(sequential[policy_name][1], parallel[policy_name][1])
+
     def test_aht_counts_first_target_active_period_toward_block(self) -> None:
         policy = AgrawalHegdeTeneketzisPolicy(
             k=3,
@@ -113,8 +133,8 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(policy.phase, "ready")
 
-    def test_hiring_ucb_counts_first_target_active_period_toward_buffer(self) -> None:
-        policy = HiringUCBPolicy(
+    def test_optimistic_hire_counts_first_target_active_period_toward_buffer(self) -> None:
+        policy = OptimisticHire(
             k=3,
             m=1,
             gamma=1.0,
@@ -138,8 +158,8 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(policy.phase, "ready")
 
-    def test_hiring_ucb_bijection_returns_no_switches_at_horizon(self) -> None:
-        policy = HiringUCBPolicy(
+    def test_optimistic_hire_bijection_returns_no_switches_at_horizon(self) -> None:
+        policy = OptimisticHire(
             k=2,
             m=1,
             gamma=1.0,
@@ -175,8 +195,8 @@ class RegressionTests(unittest.TestCase):
             gamma="auto",
             **kwargs,
         )
-        self.assertIsInstance(policy, HiringUCBPolicy)
-        assert isinstance(policy, HiringUCBPolicy)
+        self.assertIsInstance(policy, OptimisticHire)
+        assert isinstance(policy, OptimisticHire)
 
         self.assertGreater(policy.cfg.gamma, 0.0)
         self.assertAlmostEqual(policy.cfg.gamma, expected_gamma)

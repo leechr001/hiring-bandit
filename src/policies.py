@@ -98,12 +98,18 @@ class DelayedActionPolicy(ABC):
 
         feasible: List[Tuple[int, int]] = []
         for pair in proposed:
+            if hasattr(env, "can_append_replacement"):
+                if env.can_append_replacement(feasible, pair):
+                    feasible.append(pair)
+                continue
+
             candidate = feasible + [pair]
             try:
                 env.validate_replacements(candidate)
             except ValueError:
                 continue
-            feasible.append(pair)
+            else:
+                feasible.append(pair)
 
         return feasible
 

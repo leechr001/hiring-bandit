@@ -13,6 +13,7 @@ T = 5 * 365 * 24
 c = 8
 omega_max = 8
 n_runs = 5
+n_jobs = 4
 
 base_seed = 12345
 
@@ -53,6 +54,7 @@ plot_final_regret_sweep(
         "c": c,
         "omega_max": omega_max,
         "n_runs": n_runs,
+        "n_jobs": n_jobs,
         "seed0": base_seed,
     },
     title=(

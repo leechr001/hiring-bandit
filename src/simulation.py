@@ -8,7 +8,7 @@ from policies import (
     AgrawalHegdeTeneketzisPolicy
 )
 
-from hiring_ucb import HiringUCBPolicy
+from optimistic_hire import OptimisticHire
 from samplers import (
     make_bernoulli_samplers, 
     make_calendar_adversarial_delay,
@@ -19,13 +19,16 @@ from samplers import (
 )
 
 from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor
 import math
+import multiprocessing as mp
 import random
 import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import PercentFormatter
 
 
 # ----------------------------
@@ -222,6 +225,7 @@ def plot_regret_series(
     figure_kwargs: Optional[Mapping[str, Any]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     grid_kwargs: Optional[Mapping[str, Any]] = None,
+    y_axis_percent: bool = False,
     save_path: Optional[str] = None,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
@@ -254,6 +258,8 @@ def plot_regret_series(
     plt.title(title)
     if ylim is not None:
         plt.ylim(*ylim)
+    if y_axis_percent:
+        plt.gca().yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
 
     merged_grid_kwargs: Dict[str, Any] = {}
     if grid_kwargs:
@@ -278,6 +284,7 @@ def plot_average_regret_series(
     figure_kwargs: Optional[Mapping[str, Any]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     grid_kwargs: Optional[Mapping[str, Any]] = None,
+    y_axis_percent: bool = False,
     save_path: Optional[str] = None,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
@@ -300,6 +307,7 @@ def plot_average_regret_series(
         figure_kwargs=figure_kwargs,
         ylim=ylim,
         grid_kwargs=grid_kwargs,
+        y_axis_percent=y_axis_percent,
         save_path=save_path,
         precomputed=(means, averaged_results),
     )
@@ -663,7 +671,7 @@ def make_policy(
       - "worktrial", "work-trial"
       - "threshold", "threshold-n"
       - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
-      - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"
+      - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1", "oh"
       - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
     """
     name = policy_name.lower().strip()
@@ -705,7 +713,7 @@ def make_policy(
         return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
     # Adaptive batching algorithm from the paper
-    elif name in {"optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1"}:
+    elif name in {"optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1", "oh"}:
         resolved_gamma: float
         if name == "optimistic-hire-auto" or gamma == "auto":
             resolved_gamma = compute_optimistic_hire_auto_gamma(
@@ -719,16 +727,16 @@ def make_policy(
             raise ValueError("gamma must be a positive float or 'auto'.")
         else:
             resolved_gamma = float(gamma)
-        return HiringUCBPolicy(k=k, m=m, gamma=resolved_gamma, horizon=T, rng=rng)
+        return OptimisticHire(k=k, m=m, gamma=resolved_gamma, horizon=T, rng=rng)
     
     elif name in {"optimistic-hire-gamma-1"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
+        return OptimisticHire(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
     
     elif name in {"optimistic-hire-gamma-2"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=(c+omega_max) * m, horizon=T, rng=rng)
+        return OptimisticHire(k=k, m=m, gamma=(c+omega_max) * m, horizon=T, rng=rng)
     
     elif name in {"optimistic-hire-gamma-3"}:
-        return HiringUCBPolicy(k=k, m=m, gamma=c * m, horizon=T, rng=rng)
+        return OptimisticHire(k=k, m=m, gamma=c * m, horizon=T, rng=rng)
     
     # Paper by Agrawal, Hedge, and Teneketzis 
     elif name in {"agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"}:
@@ -811,6 +819,72 @@ def run_episode(
 
     return np.cumsum(regret_increments)
 
+
+def _run_episode_worker(
+    *,
+    policy_name: str,
+    k: int,
+    m: int,
+    means: Sequence[float],
+    reward_process_name: str,
+    reward_stddev: float,
+    reward_lower: float,
+    reward_upper: float,
+    delay_process_name: str,
+    delay_lower: int,
+    calendar_frequency: Optional[int],
+    calendar_distribution: str,
+    calendar_geom_p: float,
+    T: int,
+    epsilon: float,
+    review_interval: int,
+    work_trial_periods: int,
+    work_trial_rotation_periods: int,
+    threshold: float,
+    gamma: float | str,
+    c: float,
+    omega_max: int,
+    seed: int,
+) -> np.ndarray:
+    reward_sampler_factory = make_reward_sampler_factory(
+        reward_process_name,
+        means=means,
+        reward_stddev=reward_stddev,
+        reward_lower=reward_lower,
+        reward_upper=reward_upper,
+    )
+    delay_sampler_factory = make_delay_sampler_factory(
+        delay_process_name,
+        means=means,
+        omega_max=omega_max,
+        delay_lower=delay_lower,
+        calendar_frequency=calendar_frequency,
+        calendar_distribution=calendar_distribution,
+        calendar_geom_p=calendar_geom_p,
+    )
+    return run_episode(
+        policy_name=policy_name,
+        k=k,
+        m=m,
+        means=means,
+        reward_samplers=reward_sampler_factory(seed),
+        delay_sampler=delay_sampler_factory(seed),
+        T=T,
+        epsilon=epsilon,
+        review_interval=review_interval,
+        work_trial_periods=work_trial_periods,
+        work_trial_rotation_periods=work_trial_rotation_periods,
+        threshold=threshold,
+        gamma=gamma,
+        c=c,
+        omega_max=omega_max,
+        seed=seed,
+    )
+
+
+def _run_episode_worker_from_kwargs(kwargs: Mapping[str, Any]) -> np.ndarray:
+    return _run_episode_worker(**dict(kwargs))
+
 def simulate(
     *,
     policies: Sequence[str],
@@ -826,7 +900,11 @@ def simulate(
     reward_stddev: float = 0.1,
     reward_lower: float = 0.0,
     reward_upper: float = 1.0,
+    delay_process_name: str = "uniform",
     delay_lower: int = 1,
+    calendar_frequency: Optional[int] = None,
+    calendar_distribution: str = "geom",
+    calendar_geom_p: float = 0.5,
     epsilon: float = 0.1,
     review_interval: int = 6 * 30 * 24,
     work_trial_periods: int = 1,
@@ -836,10 +914,15 @@ def simulate(
     c: float = 1,
     omega_max: int = 3,
     n_runs: int = 50,
+    n_jobs: int = 1,
     seed0: int = 0,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     # Simple mean profile with a clear top-m
     rng = random.Random(999)
+    user_supplied_reward_samplers = reward_samplers is not None
+    user_supplied_delay_sampler = delay_sampler is not None
+    user_supplied_reward_factory = reward_sampler_factory is not None
+    user_supplied_delay_factory = delay_sampler_factory is not None
 
     if reward_samplers is not None and reward_sampler_factory is not None:
         raise ValueError("Pass either reward_samplers or reward_sampler_factory, not both.")
@@ -859,50 +942,114 @@ def simulate(
         )
     
     if delay_sampler is None and delay_sampler_factory is None:
-        delay_sampler_factory = lambda seed: make_uniform_delay_sampler(
+        delay_sampler_factory = make_delay_sampler_factory(
+            delay_process_name,
+            means=means,
             omega_max=omega_max,
-            rng=_seeded_rng(seed, "delay"),
             delay_lower=delay_lower,
+            calendar_frequency=calendar_frequency,
+            calendar_distribution=calendar_distribution,
+            calendar_geom_p=calendar_geom_p,
+        )
+
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be >= 1.")
+    if n_jobs > 1 and (
+        user_supplied_reward_samplers
+        or user_supplied_delay_sampler
+        or user_supplied_reward_factory
+        or user_supplied_delay_factory
+    ):
+        raise ValueError(
+            "Parallel simulate() currently supports only built-in reward/delay process settings, "
+            "not custom sampler objects or factories."
         )
 
     results: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
     for pname in policies:
-        curves = []
-        for r in range(n_runs):
-            episode_seed = seed0 + r
-            episode_reward_samplers = reward_samplers
-            if episode_reward_samplers is None:
-                if reward_sampler_factory is None:
-                    raise ValueError("reward_sampler_factory must be set when reward_samplers is None.")
-                episode_reward_samplers = reward_sampler_factory(episode_seed)
+        if n_jobs == 1:
+            curves = []
+            for r in range(n_runs):
+                episode_seed = seed0 + r
+                episode_reward_samplers = reward_samplers
+                if episode_reward_samplers is None:
+                    if reward_sampler_factory is None:
+                        raise ValueError("reward_sampler_factory must be set when reward_samplers is None.")
+                    episode_reward_samplers = reward_sampler_factory(episode_seed)
 
-            episode_delay_sampler = delay_sampler
-            if episode_delay_sampler is None:
-                if delay_sampler_factory is None:
-                    raise ValueError("delay_sampler_factory must be set when delay_sampler is None.")
-                episode_delay_sampler = delay_sampler_factory(episode_seed)
+                episode_delay_sampler = delay_sampler
+                if episode_delay_sampler is None:
+                    if delay_sampler_factory is None:
+                        raise ValueError("delay_sampler_factory must be set when delay_sampler is None.")
+                    episode_delay_sampler = delay_sampler_factory(episode_seed)
 
-            curves.append(
-                run_episode(
-                    policy_name=pname,
-                    k=k,
-                    m=m,
-                    means=means,
-                    reward_samplers=episode_reward_samplers,
-                    delay_sampler=episode_delay_sampler,
-                    T=T,
-                    epsilon=epsilon,
-                    review_interval=review_interval,
-                    work_trial_periods=work_trial_periods,
-                    work_trial_rotation_periods=work_trial_rotation_periods,
-                    threshold=threshold,
-                    gamma=gamma,
-                    c=c,
-                    omega_max=omega_max,
-                    seed=episode_seed,
+                curves.append(
+                    run_episode(
+                        policy_name=pname,
+                        k=k,
+                        m=m,
+                        means=means,
+                        reward_samplers=episode_reward_samplers,
+                        delay_sampler=episode_delay_sampler,
+                        T=T,
+                        epsilon=epsilon,
+                        review_interval=review_interval,
+                        work_trial_periods=work_trial_periods,
+                        work_trial_rotation_periods=work_trial_rotation_periods,
+                        threshold=threshold,
+                        gamma=gamma,
+                        c=c,
+                        omega_max=omega_max,
+                        seed=episode_seed,
+                    )
                 )
-            )
+        else:
+            max_workers = min(n_jobs, n_runs)
+            try:
+                mp_context = mp.get_context("fork")
+            except ValueError:
+                mp_context = None
+
+            worker_kwargs = [
+                {
+                    "policy_name": pname,
+                    "k": k,
+                    "m": m,
+                    "means": means,
+                    "reward_process_name": reward_process_name,
+                    "reward_stddev": reward_stddev,
+                    "reward_lower": reward_lower,
+                    "reward_upper": reward_upper,
+                    "delay_process_name": delay_process_name,
+                    "delay_lower": delay_lower,
+                    "calendar_frequency": calendar_frequency,
+                    "calendar_distribution": calendar_distribution,
+                    "calendar_geom_p": calendar_geom_p,
+                    "T": T,
+                    "epsilon": epsilon,
+                    "review_interval": review_interval,
+                    "work_trial_periods": work_trial_periods,
+                    "work_trial_rotation_periods": work_trial_rotation_periods,
+                    "threshold": threshold,
+                    "gamma": gamma,
+                    "c": c,
+                    "omega_max": omega_max,
+                    "seed": seed0 + r,
+                }
+                for r in range(n_runs)
+            ]
+            executor_kwargs: Dict[str, Any] = {"max_workers": max_workers}
+            if mp_context is not None:
+                executor_kwargs["mp_context"] = mp_context
+            try:
+                with ProcessPoolExecutor(**executor_kwargs) as executor:
+                    curves = list(executor.map(_run_episode_worker_from_kwargs, worker_kwargs))
+            except (OSError, PermissionError):
+                curves = [
+                    _run_episode_worker_from_kwargs(kwargs)
+                    for kwargs in worker_kwargs
+                ]
         curves = np.stack(curves, axis=0)
         mean_curve = curves.mean(axis=0)
         std_curve = curves.std(axis=0)
@@ -930,21 +1077,12 @@ def run_policy_comparisons(
     calendar_geom_p: float = 0.5,
     labels: Optional[Sequence[str]] = None,
     n_runs: int = 20,
+    n_jobs: int = 1,
     base_seed: int = 12345,  
     title: str = 'Regret by Policy'
 ) -> None:
     if labels is None:
         labels = policies
-
-    delay_sampler_factory = make_delay_sampler_factory(
-        delay_process_name,
-        means=means,
-        omega_max=omega_max,
-        delay_lower=delay_lower,
-        calendar_frequency=calendar_frequency,
-        calendar_distribution=calendar_distribution,
-        calendar_geom_p=calendar_geom_p,
-    )
 
     series = [
         ExperimentSeries(policy_name=pname, label=plabel)
@@ -955,10 +1093,15 @@ def run_policy_comparisons(
         "m": m,
         "T": T,
         "means": means,
-        "delay_sampler_factory": delay_sampler_factory,
+        "delay_process_name": delay_process_name,
+        "delay_lower": delay_lower,
+        "calendar_frequency": calendar_frequency,
+        "calendar_distribution": calendar_distribution,
+        "calendar_geom_p": calendar_geom_p,
         "c": c,
         "omega_max": omega_max,
         "n_runs": n_runs,
+        "n_jobs": n_jobs,
         "seed0": base_seed,
     }
 
@@ -1073,6 +1216,7 @@ def run_omega_sweep(
     omega_max_values: Sequence[float],
     omega_process: str = 'stochastic',
     n_runs: int = 20,
+    n_jobs: int = 1,
     base_seed: int = 12345,
     y_up_lim: int = 2500
 ) -> None:
@@ -1083,14 +1227,10 @@ def run_omega_sweep(
     series = [
         ExperimentSeries(
             policy_name=policy_name,
-            label=rf"$\omega_\max={int(value):.2f}$",
+            label=rf"$\omega_\max={int(round(value))}$",
             sim_kwargs={
                 "omega_max": int(value),
-                "delay_sampler_factory": make_delay_sampler_factory(
-                    delay_name,
-                    means=means,
-                    omega_max=int(value),
-                ),
+                "delay_process_name": delay_name,
             },
             plot_kwargs={"linewidth": 2},
         )
@@ -1105,9 +1245,10 @@ def run_omega_sweep(
             "means": means,
             "c": c,
             "n_runs": n_runs,
+            "n_jobs": n_jobs,
             "seed0": base_seed,
         },
-        title=rf"Average regret over {n_runs} runs with $c = {c}$ and {omega_process} delay process.",
+        title=rf"Cumulative regret of {policy_name} with vaying max delays.",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},

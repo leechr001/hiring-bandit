@@ -204,6 +204,7 @@ plot_regret_series(
     title=average_title,
     ylabel="Normalized loss",
     ylim=(0, 0.25),
+    y_axis_percent=True,
     save_path=str(output_dir / "benchmark_normalized_loss.png"),
     precomputed=(means, normalized_results),
 )

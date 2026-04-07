@@ -11,6 +11,7 @@ means = np.linspace(0.3, 0.8, k).tolist()
 omega_max = 5
 c_values = [1, 3, 5, 10, 15]
 n_runs = 20
+n_jobs = 4
 
 for policy_name in ["optimistic-hire-gamma-1", "optimistic-hire-gamma-2"]:
     series = [
@@ -32,6 +33,7 @@ for policy_name in ["optimistic-hire-gamma-1", "optimistic-hire-gamma-2"]:
             "means": means,
             "omega_max": omega_max,
             "n_runs": n_runs,
+            "n_jobs": n_jobs,
         },
         title=rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$",
         xlabel="t",

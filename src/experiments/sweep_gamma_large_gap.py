@@ -13,6 +13,7 @@ T = 5 * 365 * 24
 c = 8
 omega_max = 8
 n_runs = 5
+n_jobs = 4
 
 base_seed = 12345
 
@@ -50,6 +51,7 @@ plot_regret_series(
         "c": c,
         "omega_max": omega_max,
         "n_runs": n_runs,
+        "n_jobs": n_jobs,
     },
     title=rf"Cumulative regret for a large gap instance ($\Delta\leq 0.5$).",
     xlabel="t",

@@ -47,6 +47,7 @@ simulate_kwargs = {
     "omega_max": omega_max,
     "delay_lower": 8,
     "n_runs": n_runs,
+    "n_jobs": 4,
     "review_interval": 6 * 30 * 24,
     "work_trial_periods": 1,
     "work_trial_rotation_periods": 90 * 24,

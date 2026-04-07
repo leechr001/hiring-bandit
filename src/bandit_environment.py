@@ -100,6 +100,7 @@ class TemporaryHiringBanditEnv:
         self.t: int = 0
         self.active_set: Set[int] = set()
         self.pending: List[PendingReplacement] = []
+        self.pending_workers: Set[int] = set()
 
         if initial_workforce is None:
             initial_workforce = list(range(1, m + 1))
@@ -119,6 +120,7 @@ class TemporaryHiringBanditEnv:
         self.t = 1
         self.active_set = set(init)
         self.pending = []
+        self.pending_workers = set()
         return self._get_obs()
 
     def _get_obs(self) -> EnvObservation:
@@ -132,11 +134,53 @@ class TemporaryHiringBanditEnv:
         )
 
     def _workers_in_pending(self) -> Set[int]:
-        s: Set[int] = set()
-        for pr in self.pending:
-            s.add(pr.i)
-            s.add(pr.j)
-        return s
+        return set(self.pending_workers)
+
+    def _validate_single_replacement(
+        self,
+        i: int,
+        j: int,
+        *,
+        pending_workers: Set[int],
+        seen_remove: Set[int],
+        seen_add: Set[int],
+    ) -> None:
+        if not (1 <= i <= self.k and 1 <= j <= self.k):
+            raise ValueError(f"Invalid worker ids in replacement ({i}, {j}).")
+        if i == j:
+            raise ValueError("Replacement must be between distinct workers.")
+        if i not in self.active_set:
+            raise ValueError(f"Cannot replace {i}: not currently active.")
+        if j in self.active_set:
+            raise ValueError(f"Cannot add {j}: already active.")
+        if i in pending_workers or j in pending_workers:
+            raise ValueError(
+                f"Cannot use {i} or {j}: worker appears in a pending replacement."
+            )
+        if i in seen_remove:
+            raise ValueError(f"Worker {i} appears twice as a removed worker in R_t.")
+        if j in seen_add:
+            raise ValueError(f"Worker {j} appears twice as an added worker in R_t.")
+
+    def can_append_replacement(
+        self,
+        accepted: Sequence[Tuple[int, int]],
+        pair: Tuple[int, int],
+    ) -> bool:
+        pending_workers = self.pending_workers
+        seen_remove = {remove_id for remove_id, _ in accepted}
+        seen_add = {add_id for _, add_id in accepted}
+        try:
+            self._validate_single_replacement(
+                int(pair[0]),
+                int(pair[1]),
+                pending_workers=pending_workers,
+                seen_remove=seen_remove,
+                seen_add=seen_add,
+            )
+        except ValueError:
+            return False
+        return True
 
     def validate_replacements(self, replacements: Sequence[Tuple[int, int]]) -> None:
         """
@@ -146,28 +190,18 @@ class TemporaryHiringBanditEnv:
           - remove workers must currently be active
           - add workers must not currently be active
         """
-        pending_workers = self._workers_in_pending()
+        pending_workers = self.pending_workers
         seen_remove: Set[int] = set()
         seen_add: Set[int] = set()
 
         for (i, j) in replacements:
-            if not (1 <= i <= self.k and 1 <= j <= self.k):
-                raise ValueError(f"Invalid worker ids in replacement ({i}, {j}).")
-            if i == j:
-                raise ValueError("Replacement must be between distinct workers.")
-            if i not in self.active_set:
-                raise ValueError(f"Cannot replace {i}: not currently active.")
-            if j in self.active_set:
-                raise ValueError(f"Cannot add {j}: already active.")
-            if i in pending_workers or j in pending_workers:
-                raise ValueError(
-                    f"Cannot use {i} or {j}: worker appears in a pending replacement."
-                )
-            if i in seen_remove:
-                raise ValueError(f"Worker {i} appears twice as a removed worker in R_t.")
-            if j in seen_add:
-                raise ValueError(f"Worker {j} appears twice as an added worker in R_t.")
-
+            self._validate_single_replacement(
+                int(i),
+                int(j),
+                pending_workers=pending_workers,
+                seen_remove=seen_remove,
+                seen_add=seen_add,
+            )
             seen_remove.add(i)
             seen_add.add(j)
 
@@ -208,6 +242,8 @@ class TemporaryHiringBanditEnv:
                     completion_time=self.t + omega
                 )
             )
+            self.pending_workers.add(i)
+            self.pending_workers.add(j)
 
         # 2) Realize previously initiated replacements that complete at t.
         completing = [pr for pr in self.pending if pr.completion_time == self.t]
@@ -217,6 +253,9 @@ class TemporaryHiringBanditEnv:
             for pr in completing:
                 self.active_set.add(pr.j)
             self.pending = [pr for pr in self.pending if pr.completion_time != self.t]
+            for pr in completing:
+                self.pending_workers.discard(pr.i)
+                self.pending_workers.discard(pr.j)
 
         if len(self.active_set) != self.m:
             raise RuntimeError(

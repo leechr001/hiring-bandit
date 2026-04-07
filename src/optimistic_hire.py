@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 @dataclass
-class HiringUCBConfig:
+class OptimisticHireConfig:
     k: int
     m: int
     gamma: float
@@ -17,7 +17,7 @@ class HiringUCBConfig:
     ucb_coef: float = 2.0
 
 
-class HiringUCBPolicy(StatefulDelayedActionPolicy):
+class OptimisticHire(StatefulDelayedActionPolicy):
     """
     Implements Algorithm 1 (Optimistic-Hire).
 
@@ -54,7 +54,7 @@ class HiringUCBPolicy(StatefulDelayedActionPolicy):
         if horizon is not None and horizon <= 0:
             raise ValueError("horizon must be > 0 when provided.")
 
-        self.cfg = HiringUCBConfig(k=k, m=m, gamma=gamma, horizon=horizon)
+        self.cfg = OptimisticHireConfig(k=k, m=m, gamma=gamma, horizon=horizon)
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
 
