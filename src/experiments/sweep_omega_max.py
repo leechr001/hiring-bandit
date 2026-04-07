@@ -7,7 +7,7 @@ k = 150
 m = 100
 T = 5 * 365 * 24
 c = 8
-n_runs = 5
+n_runs = 4
 n_jobs = 4
 
 # set common upper limit on y axis for compairson
@@ -28,7 +28,7 @@ for delay_process in ("adversarial", "stochastic"):
         means=means,
         c=c,
         omega_max_values=omega_max_values,
-        omega_process = delay_process,
+        omega_process=delay_process,
         n_runs=n_runs,
         n_jobs=n_jobs,
         y_up_lim=y_up_lim
@@ -42,7 +42,7 @@ for delay_process in ("adversarial", "stochastic"):
         means=means,
         c=c,
         omega_max_values=omega_max_values,
-        omega_process = delay_process,
+        omega_process=delay_process,
         n_runs=n_runs,
         n_jobs=n_jobs,
         y_up_lim=y_up_lim
@@ -56,7 +56,7 @@ for delay_process in ("adversarial", "stochastic"):
         means=means,
         c=c,
         omega_max_values=omega_max_values,
-        omega_process = delay_process,
+        omega_process=delay_process,
         n_runs=n_runs,
         n_jobs=n_jobs,
         y_up_lim=y_up_lim
