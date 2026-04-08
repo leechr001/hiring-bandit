@@ -1213,8 +1213,10 @@ def run_omega_sweep(
     policy_name: str = 'optimistic-hire',
     means: Sequence[float],
     c: float,
-    omega_max_values: Sequence[float],
+    omega_values: Sequence[float],
     omega_process: str = 'stochastic',
+    omega_value_type: str = "max",
+    stochastic_radius_scale: float = 1.2,
     n_runs: int = 20,
     n_jobs: int = 1,
     base_seed: int = 12345,
@@ -1222,20 +1224,50 @@ def run_omega_sweep(
 ) -> None:
     if omega_process not in {"stochastic", "adversarial"}:
         raise ValueError("delays process not one of: 'stochastic', 'adversarial'")
+    if omega_value_type not in {"max", "mean"}:
+        raise ValueError("omega_value_type must be one of: 'max', 'mean'.")
+    if stochastic_radius_scale < 0:
+        raise ValueError("stochastic_radius_scale must be non-negative.")
 
     delay_name = "stochastic" if omega_process == "stochastic" else "adversarial"
-    series = [
-        ExperimentSeries(
-            policy_name=policy_name,
-            label=rf"$\omega_\max={int(round(value))}$",
-            sim_kwargs={
-                "omega_max": int(value),
+
+    def _resolve_omega_spec(value: float) -> tuple[str, Dict[str, Any]]:
+        omega_value = float(value)
+        if omega_process == "stochastic" and omega_value_type == "mean":
+            radius = stochastic_radius_scale * omega_value
+            delay_lower = max(1, int(math.ceil(omega_value - radius)))
+            delay_upper = max(delay_lower, int(math.floor(omega_value + radius)))
+            expected_delay = 0.5 * (delay_lower + delay_upper)
+            return (
+                rf"$\mathbb E [\omega]={int(round(expected_delay))}$",
+                {
+                    "omega_max": delay_upper,
+                    "delay_lower": delay_lower,
+                    "delay_process_name": delay_name,
+                },
+            )
+
+        rounded_value = int(round(omega_value))
+        return (
+            rf"$\omega_\max={rounded_value}$",
+            {
+                "omega_max": rounded_value,
                 "delay_process_name": delay_name,
             },
-            plot_kwargs={"linewidth": 2},
         )
-        for value in omega_max_values
-    ]
+
+    series = []
+    for value in omega_values:
+        label, sim_kwargs = _resolve_omega_spec(value)
+        series.append(
+            ExperimentSeries(
+                policy_name=policy_name,
+                label=label,
+                sim_kwargs=sim_kwargs,
+                plot_kwargs={"linewidth": 2},
+            )
+        )
+
     plot_regret_series(
         series=series,
         simulate_kwargs={
@@ -1248,7 +1280,7 @@ def run_omega_sweep(
             "n_jobs": n_jobs,
             "seed0": base_seed,
         },
-        title=rf"Cumulative regret of {policy_name} with vaying max delays.",
+        title=rf"Cumulative regret of {policy_name} with {omega_process} delays.",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},
