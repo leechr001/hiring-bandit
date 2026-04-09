@@ -1,10 +1,12 @@
 from bandit_environment import StepFeedback
+from bijections import optimistic_hire_rank_matching_bijection
+from choose_target import choose_target
 from policies import StatefulDelayedActionPolicy
 
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -14,7 +16,7 @@ class OptimisticHireConfig:
     m: int
     gamma: float
     horizon: Optional[int] = None
-    ucb_coef: float = 2.0
+    ucb_coef: float = 1.0
 
 
 class OptimisticHire(StatefulDelayedActionPolicy):
@@ -28,11 +30,11 @@ class OptimisticHire(StatefulDelayedActionPolicy):
 
     Iteration structure:
     - At the start of each iteration, compute a target workforce U_ell (top-m by UCB, respecting cost constraint),
-      compute a buffer threshold N(ell), and identify i_min in U_ell with minimal count
+      compute a block threshold N(ell), and identify i_min in U_ell with minimal count
       at iteration start c_ell.
     - Initiate one-for-one replacements to move toward U_ell.
     - Transition phase: do not initiate further replacements until env.active_set == U_ell.
-    - Hold phase: keep the workforce fixed until
+    - Block phase: keep the workforce fixed until
           T_{i_min}(t) - T_{i_min}(c_ell) >= N(ell),
       where T_i is the cumulative number of observed outcomes for worker i.
 
@@ -58,10 +60,10 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
 
-        # Buffer control state (count-based stopping rule)
+        # block control state (count-based stopping rule)
         self.i_min: Optional[int] = None                 # 1-indexed worker ID
         self.i_min_count_at_c: Optional[int] = None      # T_{i_min}(c_ell)
-        self.buffer_threshold_N: int = 0                  # N(ell)
+        self.block_threshold_N: int = 0                  # N(ell)
         self.reset()
 
     # ----------------------------
@@ -73,9 +75,9 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         self.iterations = 0
         self.i_min = None
         self.i_min_count_at_c = None
-        self.buffer_threshold_N = 0
+        self.block_threshold_N = 0
 
-    def initialize_control(self, active_now: Sequence[int], env) -> None:
+    def initialize_control(self, active_now: Sequence[int], _env) -> None:
         self.prev_target = set(active_now)
         self.current_target = set(active_now)
         self.phase = "ready"
@@ -86,28 +88,31 @@ class OptimisticHire(StatefulDelayedActionPolicy):
 
         self.iterations += 1
 
-        new_target = self.compute_target()
-        self.buffer_threshold_N = self.compute_buffer_length(new_target)
+        new_target = self.compute_target(
+            active=active_now,
+            current_period=env.t,
+            switching_cost=env.c,
+        )
+        self.block_threshold_N = self.compute_block_length(new_target)
         self.i_min, self.i_min_count_at_c = self._compute_i_min_and_baseline(new_target)
         return sorted(new_target)
 
-    def on_hold_feedback(self, feedback: StepFeedback) -> None:
+    def on_hold_feedback(self, _feedback: StepFeedback) -> None:
         if self.i_min is None or self.i_min_count_at_c is None:
             self.prev_target = set(self.current_target)
             self.phase = "ready"
             return
 
         cur = int(self.counts[self.i_min - 1])
-        if cur - int(self.i_min_count_at_c) >= int(self.buffer_threshold_N):
+        if cur - int(self.i_min_count_at_c) >= int(self.block_threshold_N):
             self.prev_target = set(self.current_target)
             self.phase = "ready"
     
     def _confidence_rad(self, i:int):
         """Return the confidence radius for arm i"""
-        k, m = self.cfg.k, self.cfg.m
 
         t_for_log = max(1, self.t)
-        log_term = math.log(max(2, k * m * t_for_log))
+        log_term = math.log(t_for_log)
 
         return math.sqrt(self.cfg.ucb_coef * log_term / self.counts[i])
 
@@ -115,7 +120,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         Compute UCB indices.
 
-            UCB_i(t) = mean_i(t) + sqrt( ucb_coef * log(k*m*t) / T_i(t) ),
+            UCB_i(t) = mean_i(t) + sqrt( ucb_coef * log(t) / T_i(t) ),
             with UCB_i(t) = +inf when T_i(t) = 0.
         """
         k = self.cfg.k
@@ -135,8 +140,8 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         Compute LCB indices.
 
-            LCB_i(t) = mean_i(t) - sqrt( ucb_coef * log(k*m*t) / T_i(t) ),
-            with LCB_i(t) = +inf when T_i(t) = 0.
+            LCB_i(t) = mean_i(t) - sqrt( ucb_coef * log(t) / T_i(t) ),
+            with LCB_i(t) = -inf when T_i(t) = 0.
         """
 
         k = self.cfg.k
@@ -156,23 +161,37 @@ class OptimisticHire(StatefulDelayedActionPolicy):
     # Core algorithm pieces
     # ----------------------------
 
-    def compute_target(self) -> Set[int]:
+    def compute_target(
+        self,
+        active: Optional[Sequence[int]] = None,
+        *,
+        current_period: Optional[int] = None,
+        switching_cost: float = 0.0,
+    ) -> Set[int]:
         """
         Compute the optimistic target workforce U_ell.
 
-        Since the objective is additive, the optimistic solution is the top-m workers by UCB.
-        Ties are broken randomly.
+        This solves the horizon-aware ChooseTarget subproblem from the paper:
+        maximize the sum of UCB scores over the target workforce while only
+        allowing rank-matched replacements whose optimistic benefit can recover
+        the switching cost over the remaining horizon.
         """
-        ucb = self.ucb_values()
+        if active is None:
+            active = sorted(self.current_target)
 
-        idxs = list(range(self.cfg.k))
-        self.rng.shuffle(idxs)
-        idxs.sort(key=lambda i: ucb[i], reverse=True)
+        result = choose_target(
+            active_set=active,
+            counts=self.counts.tolist(),
+            empirical_means=self.empirical_means().tolist(),
+            current_period=current_period,
+            horizon=self.cfg.horizon,
+            switching_cost=switching_cost,
+            ucb_coef=self.cfg.ucb_coef,
+            time_index=self.t,
+        )
+        return set(result.target)
 
-        top = idxs[: self.cfg.m]
-        return {i + 1 for i in top}  # 1-indexed worker IDs
-
-    def compute_buffer_length(self, target: Set[int]) -> int:
+    def compute_block_length(self, target: Set[int]) -> int:
         """
         Compute N(ell) based on counts at the start of the iteration (c_ell):
 
@@ -217,48 +236,17 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         -------
         List of (remove_id, add_id) replacement pairs.
         """
-        cur_set = set(current)
-        tar_set = set(target)
-
-        remove = list(cur_set - tar_set)
-        add = list(tar_set - cur_set)
-
-        if not remove or not add:
-            return []
-
-        # Ensure equal length (defensive; should match in intended use).
-        n = min(len(remove), len(add))
-        remove = remove[:n]
-        add = add[:n]
-
         lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
-
-        def lcb_key(worker_id: int) -> Tuple[float, int]:
-            # Sort by LCB descending, then by worker_id ascending for stable tie-break.
-            return (float(lcb[worker_id - 1]), -worker_id)
-
-        # Descending by LCB; tie-break deterministically.
-        remove.sort(key=lcb_key, reverse=True)
-        add.sort(key=lcb_key, reverse=True)
-
-
-        pairs = list(zip(remove, add))
-
-        if self.cfg.horizon is None or current_period is None:
-            return pairs
-
-        remaining_periods = int(self.cfg.horizon) - int(current_period)
-        if remaining_periods <= 0:
-            return []
-
-        threshold = float(switching_cost) / float(remaining_periods)
-        admissible: List[Tuple[int, int]] = []
-        for i, j in pairs:
-            if float(ucb[j - 1]) - float(lcb[i - 1]) >= threshold:
-                admissible.append((i, j))
-
-        return admissible
+        return optimistic_hire_rank_matching_bijection(
+            current,
+            target,
+            lcb_values=lcb.tolist(),
+            ucb_values=ucb.tolist(),
+            current_period=current_period,
+            horizon=self.cfg.horizon,
+            switching_cost=switching_cost,
+        )
 
     def _compute_i_min_and_baseline(self, target: Set[int]) -> Tuple[int, int]:
         """

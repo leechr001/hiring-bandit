@@ -8,6 +8,7 @@ import numpy as np
 
 from experiments.benchmark_config import (
     average_title,
+    curve_cache_mode,
     cumulative_title,
     output_dir,
     planning_horizons,
@@ -166,27 +167,63 @@ def _load_saved_results(
     return means, results, normalized_results
 
 
-output_dir.mkdir(parents=True, exist_ok=True)
-curves_path = output_dir / "benchmark_curves.npz"
+def _resolve_curve_data(
+    *,
+    curves_path: Path,
+    cache_mode: str,
+    output_series,
+    simulate_kwargs,
+    average_title: str,
+):
+    mode = cache_mode.strip().lower()
+    if mode not in {"auto", "load", "regenerate"}:
+        raise ValueError(
+            "curve_cache_mode must be one of: 'auto', 'load', 'regenerate'."
+        )
 
-if curves_path.exists():
-    means, results, normalized_results = _load_saved_results(
-        curves_path=curves_path,
-        output_series=series,
-    )
-else:
+    if mode == "load":
+        if not curves_path.exists():
+            raise FileNotFoundError(
+                f"curve_cache_mode='load' requires an existing file at {curves_path}."
+            )
+        means, results, normalized_results = _load_saved_results(
+            curves_path=curves_path,
+            output_series=output_series,
+        )
+        return means, results, normalized_results, False
+
+    if mode == "auto" and curves_path.exists():
+        means, results, normalized_results = _load_saved_results(
+            curves_path=curves_path,
+            output_series=output_series,
+        )
+        return means, results, normalized_results, False
+
     means, results = run_series_simulations(
-        series=series,
+        series=output_series,
         simulate_kwargs=simulate_kwargs,
     )
     _, normalized_results = plot_average_regret_series(
-        series=series,
+        series=output_series,
         simulate_kwargs=simulate_kwargs,
         title=average_title,
         ylim=(0, 0.25),
         precomputed=(means, results),
     )
     plt.close()
+    return means, results, normalized_results, True
+
+
+output_dir.mkdir(parents=True, exist_ok=True)
+curves_path = output_dir / "benchmark_curves.npz"
+
+means, results, normalized_results, should_write_curves = _resolve_curve_data(
+    curves_path=curves_path,
+    cache_mode=curve_cache_mode,
+    output_series=series,
+    simulate_kwargs=simulate_kwargs,
+    average_title=average_title,
+)
 
 plot_regret_series(
     series=series,
@@ -219,23 +256,24 @@ print_planning_horizon_regret_table(
     horizons=planning_horizons,
 )
 
-periods = np.arange(1, len(next(iter(results.values()))[0]) + 1, dtype=np.int64)
-npz_payload = {
-    "means": np.asarray(means, dtype=np.float64),
-    "periods": periods,
-    "labels": np.asarray([spec.label or spec.policy_name for spec in series], dtype=object),
-}
-for spec in series:
-    label = spec.label or spec.policy_name
-    slug = _slug(label)
-    mean_curve, std_curve = results[label]
-    norm_mean_curve, norm_std_curve = normalized_results[label]
-    npz_payload[f"{slug}_cumulative_mean"] = np.asarray(mean_curve, dtype=np.float64)
-    npz_payload[f"{slug}_cumulative_std"] = np.asarray(std_curve, dtype=np.float64)
-    npz_payload[f"{slug}_normalized_mean"] = np.asarray(norm_mean_curve, dtype=np.float64)
-    npz_payload[f"{slug}_normalized_std"] = np.asarray(norm_std_curve, dtype=np.float64)
+if should_write_curves:
+    periods = np.arange(1, len(next(iter(results.values()))[0]) + 1, dtype=np.int64)
+    npz_payload = {
+        "means": np.asarray(means, dtype=np.float64),
+        "periods": periods,
+        "labels": np.asarray([spec.label or spec.policy_name for spec in series], dtype=object),
+    }
+    for spec in series:
+        label = spec.label or spec.policy_name
+        slug = _slug(label)
+        mean_curve, std_curve = results[label]
+        norm_mean_curve, norm_std_curve = normalized_results[label]
+        npz_payload[f"{slug}_cumulative_mean"] = np.asarray(mean_curve, dtype=np.float64)
+        npz_payload[f"{slug}_cumulative_std"] = np.asarray(std_curve, dtype=np.float64)
+        npz_payload[f"{slug}_normalized_mean"] = np.asarray(norm_mean_curve, dtype=np.float64)
+        npz_payload[f"{slug}_normalized_std"] = np.asarray(norm_std_curve, dtype=np.float64)
 
-np.savez(output_dir / "benchmark_curves.npz", **npz_payload)
+    np.savez(output_dir / "benchmark_curves.npz", **npz_payload)
 _save_text(
     output_dir / "benchmark_planning_horizons_mean_pm_std.tex",
     _build_latex_table(
@@ -257,6 +295,7 @@ with (output_dir / "benchmark_metadata.json").open("w") as handle:
             "planning_horizons": planning_horizons,
             "cumulative_title": cumulative_title,
             "average_title": average_title,
+            "curve_cache_mode": curve_cache_mode,
             "artifacts": {
                 "cumulative_plot": "benchmark_cum_regret.png",
                 "normalized_plot": "benchmark_normalized_loss.png",

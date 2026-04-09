@@ -56,6 +56,12 @@ simulate_kwargs = {
 cumulative_title = "Cumulative Regret of Optimistic-Hire Compared to Benchmarks"
 average_title = "Normalized Loss of Optimistic-Hire Compared to Benchmarks"
 
+# Curve cache mode for benchmark.py:
+#   - "auto": load benchmark_curves.npz when present, otherwise rerun simulations
+#   - "load": rebuild plots/tables from benchmark_curves.npz only
+#   - "regenerate": rerun simulations and overwrite benchmark_curves.npz
+curve_cache_mode = "regenerate"
+
 planning_horizons = [
     ("1 month", 30 * 24),
     ("12 months", 365 * 24),

@@ -227,6 +227,7 @@ def plot_regret_series(
     grid_kwargs: Optional[Mapping[str, Any]] = None,
     y_axis_percent: bool = False,
     save_path: Optional[str] = None,
+    show_plot: bool = True,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     if precomputed is None:
@@ -269,7 +270,9 @@ def plot_regret_series(
     plt.tight_layout()
     if save_path is not None:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    plt.show()
+    if show_plot:
+        plt.show()
+    plt.close()
 
     return means, results
 
@@ -522,6 +525,51 @@ def _validate_optimistic_hire_auto_gamma_inputs(
         raise ValueError("omega_max must be non-negative.")
 
 
+def _optimistic_hire_bound_components(
+    *,
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+    omega_max: int,
+) -> Tuple[float, float, float, float]:
+    """Return the constant, gamma, sqrt(gamma), and 1/sqrt(gamma) coefficients."""
+    log_T = math.log(T)
+    if log_T <= 0.0:
+        raise ValueError("Optimistic-Hire auto gamma requires T > 1.")
+
+    log_ratio = math.log((m * T) / ((k - m) * log_T))
+
+    leading_term = 5.0 * math.sqrt(m * (k - m) * T * log_T)
+    switching_term = (c + 1.0) * (k - m)
+    if c > 0.0:
+        switching_term += (k - m) * c * math.log(
+            (c * m * T) / ((k - m) * log_T)
+        )
+
+    constant_term = (
+        leading_term
+        + switching_term
+        + k
+        + (4.0 * m * k) / T
+        + (omega_max + c) * m * k
+    )
+    gamma_coeff = float(k)
+    sqrt_gamma_coeff = (
+        2.0
+        * (k - m)
+        * math.sqrt(4.0 * log_T)
+        * (1.0 + 0.5 * log_ratio)
+    )
+    inverse_sqrt_gamma_coeff = (omega_max + c) * m * math.sqrt(k * T)
+    return (
+        constant_term,
+        gamma_coeff,
+        sqrt_gamma_coeff,
+        inverse_sqrt_gamma_coeff,
+    )
+
+
 def optimistic_hire_regret_bound(
     gamma: float,
     *,
@@ -542,36 +590,22 @@ def optimistic_hire_regret_bound(
     if gamma <= 0:
         raise ValueError("gamma must be > 0.")
 
-    log_kmt = math.log(k * m * T)
-    log_ratio = math.log((m * T) / ((k - m) * log_kmt))
-
-    leading_term = 5.0 * math.sqrt(m * (k - m) * T * log_kmt)
-    switching_term = c * (k - m) * math.log(T) + c * (k - m)
-    reciprocal_gamma_term = (
-        (8.0 * math.sqrt(k) / (m * gamma))
-        + (4.0 * k / (m * gamma))
-        + (21.0 / (m * gamma * k))
+    constant_term, gamma_coeff, sqrt_gamma_coeff, inverse_sqrt_gamma_coeff = (
+        _optimistic_hire_bound_components(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        )
     )
-    sqrt_gamma_term = (
-        2.0
-        * (k - m)
-        * math.sqrt(gamma * 4.0 * log_kmt)
-        * (1.0 + 0.5 * log_ratio)
-    )
-    inverse_sqrt_gamma_term = (
-        omega_max * m * math.sqrt((k * T) / gamma)
-        + c * m * math.sqrt((k * T) / gamma)
-    )
+    sqrt_gamma = math.sqrt(gamma)
 
     return (
-        leading_term
-        + switching_term
-        + k * (gamma + 1.0)
-        + reciprocal_gamma_term
-        + sqrt_gamma_term
-        + inverse_sqrt_gamma_term
-        + omega_max * m * k
-        + c * m * k
+        constant_term
+        + gamma_coeff * gamma
+        + sqrt_gamma_coeff * sqrt_gamma
+        + inverse_sqrt_gamma_coeff / sqrt_gamma
     )
 
 
@@ -592,34 +626,28 @@ def compute_optimistic_hire_auto_gamma(
         omega_max=omega_max,
     )
 
-    log_kmt = math.log(k * m * T)
-    log_ratio = math.log((m * T) / ((k - m) * log_kmt))
-
-    reciprocal_gamma_coeff = (
-        (8.0 * math.sqrt(k) / m)
-        + (4.0 * k / m)
-        + (21.0 / (m * k))
+    _, gamma_coeff, sqrt_gamma_coeff, inverse_sqrt_gamma_coeff = (
+        _optimistic_hire_bound_components(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        )
     )
-    sqrt_gamma_coeff = (
-        2.0
-        * (k - m)
-        * math.sqrt(4.0 * log_kmt)
-        * (1.0 + 0.5 * log_ratio)
-    )
-    inverse_sqrt_gamma_coeff = (omega_max + c) * m * math.sqrt(k * T)
 
-    # With x = sqrt(gamma), the derivative is:
-    #   2k x + sqrt_gamma_coeff - inverse_sqrt_gamma_coeff / x^2
-    #   - 2 * reciprocal_gamma_coeff / x^3 = 0
-    # which becomes the quartic
-    #   2k x^4 + sqrt_gamma_coeff x^3 - inverse_sqrt_gamma_coeff x - 2B = 0.
+    # With x = sqrt(gamma), the gamma-dependent terms are:
+    #   gamma_coeff * x^2 + sqrt_gamma_coeff * x + inverse_sqrt_gamma_coeff / x.
+    # The derivative is:
+    #   2 * gamma_coeff * x + sqrt_gamma_coeff - inverse_sqrt_gamma_coeff / x^2 = 0
+    # which becomes the cubic
+    #   2 * gamma_coeff * x^3 + sqrt_gamma_coeff * x^2 - inverse_sqrt_gamma_coeff = 0.
     roots = np.roots(
         [
-            2.0 * k,
+            2.0 * gamma_coeff,
             sqrt_gamma_coeff,
             0.0,
             -inverse_sqrt_gamma_coeff,
-            -2.0 * reciprocal_gamma_coeff,
         ]
     )
 
@@ -660,7 +688,7 @@ def make_policy(
     work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
     ucb_coef: float = 2.0,
-    gamma: float | str = 0.5,
+    gamma: float | str = "auto",
 ):
     """
     Factory to build a policy object consistent with the simulation interface.
@@ -910,7 +938,7 @@ def simulate(
     work_trial_periods: int = 1,
     work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
-    gamma: float | str = 0.5,
+    gamma: float | str = "auto",
     c: float = 1,
     omega_max: int = 3,
     n_runs: int = 50,
@@ -1216,16 +1244,21 @@ def run_omega_sweep(
     omega_values: Sequence[float],
     omega_process: str = 'stochastic',
     omega_value_type: str = "max",
+    stochastic_lower_fraction: float = 0.5,
     stochastic_radius_scale: float = 1.2,
     n_runs: int = 20,
     n_jobs: int = 1,
     base_seed: int = 12345,
-    y_up_lim: int = 2500
+    y_up_lim: int = 2500,
+    save_path: Optional[str] = None,
+    show_plot: bool = True,
 ) -> None:
     if omega_process not in {"stochastic", "adversarial"}:
         raise ValueError("delays process not one of: 'stochastic', 'adversarial'")
     if omega_value_type not in {"max", "mean"}:
         raise ValueError("omega_value_type must be one of: 'max', 'mean'.")
+    if not (0.0 <= stochastic_lower_fraction <= 1.0):
+        raise ValueError("stochastic_lower_fraction must be in [0, 1].")
     if stochastic_radius_scale < 0:
         raise ValueError("stochastic_radius_scale must be non-negative.")
 
@@ -1233,13 +1266,12 @@ def run_omega_sweep(
 
     def _resolve_omega_spec(value: float) -> tuple[str, Dict[str, Any]]:
         omega_value = float(value)
-        if omega_process == "stochastic" and omega_value_type == "mean":
-            radius = stochastic_radius_scale * omega_value
-            delay_lower = max(1, int(math.ceil(omega_value - radius)))
-            delay_upper = max(delay_lower, int(math.floor(omega_value + radius)))
-            expected_delay = 0.5 * (delay_lower + delay_upper)
+        rounded_value = int(round(omega_value))
+        if omega_process == "stochastic" and omega_value_type == "max":
+            delay_lower = max(1, int(math.ceil(stochastic_lower_fraction * omega_value)))
+            delay_upper = max(delay_lower, rounded_value)
             return (
-                rf"$\mathbb E [\omega]={int(round(expected_delay))}$",
+                rf"$\omega_\max={rounded_value}$",
                 {
                     "omega_max": delay_upper,
                     "delay_lower": delay_lower,
@@ -1247,7 +1279,20 @@ def run_omega_sweep(
                 },
             )
 
-        rounded_value = int(round(omega_value))
+        if omega_process == "stochastic" and omega_value_type == "mean":
+            radius = stochastic_radius_scale * omega_value
+            delay_lower = max(1, int(math.ceil(omega_value - radius)))
+            delay_upper = max(delay_lower, int(math.floor(omega_value + radius)))
+            expected_delay = 0.5 * (delay_lower + delay_upper)
+            return (
+                rf"$E [\omega]={int(round(expected_delay))}$",
+                {
+                    "omega_max": delay_upper,
+                    "delay_lower": delay_lower,
+                    "delay_process_name": delay_name,
+                },
+            )
+
         return (
             rf"$\omega_\max={rounded_value}$",
             {
@@ -1286,4 +1331,6 @@ def run_omega_sweep(
         figure_kwargs={"figsize": (8, 5)},
         ylim=(0, y_up_lim),
         grid_kwargs={"which": "both", "linestyle": "--", "alpha": 0.5},
+        save_path=save_path,
+        show_plot=show_plot,
     )
