@@ -33,7 +33,7 @@ series = [
 ]
 
 k = 150
-m = 100
+m = 50
 T = 5 * 365 * 24
 c = 8
 omega_max = 8
@@ -72,4 +72,4 @@ planning_horizons = [
     ("5 years", 5 * 365 * 24),
 ]
 
-output_dir = Path(__file__).resolve().parents[2] / "artifacts" / "benchmark"
+output_dir = Path(__file__).resolve().parents[2] / "artifacts" / "benchmark_50_150"

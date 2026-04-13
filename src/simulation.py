@@ -289,6 +289,7 @@ def plot_average_regret_series(
     grid_kwargs: Optional[Mapping[str, Any]] = None,
     y_axis_percent: bool = False,
     save_path: Optional[str] = None,
+    show_plot: bool = True,
     precomputed: Optional[Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]] = None,
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     if precomputed is None:
@@ -312,6 +313,7 @@ def plot_average_regret_series(
         grid_kwargs=grid_kwargs,
         y_axis_percent=y_axis_percent,
         save_path=save_path,
+        show_plot=show_plot,
         precomputed=(means, averaged_results),
     )
     return means, averaged_results
@@ -1202,8 +1204,17 @@ def run_c_sweep(
     means: Sequence[float],
     c_values: Sequence[float],
     omega_max: int,
+    delay_process_name: str = "uniform",
+    delay_lower: int = 1,
+    calendar_frequency: Optional[int] = None,
+    calendar_distribution: str = "geom",
+    calendar_geom_p: float = 0.5,
     n_runs: int = 20,
+    n_jobs: int = 1,
     base_seed: int = 12345,
+    y_up_lim: Optional[float] = 3500,
+    save_path: Optional[str] = None,
+    show_plot: bool = True,
 ) -> None:
     series = [
         ExperimentSeries(
@@ -1221,16 +1232,24 @@ def run_c_sweep(
             "m": m,
             "T": T,
             "means": means,
+            "delay_process_name": delay_process_name,
+            "delay_lower": delay_lower,
+            "calendar_frequency": calendar_frequency,
+            "calendar_distribution": calendar_distribution,
+            "calendar_geom_p": calendar_geom_p,
             "omega_max": omega_max,
             "n_runs": n_runs,
+            "n_jobs": n_jobs,
             "seed0": base_seed,
         },
-        title=rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$",
+        title=rf"Cumulative regret of {policy_name} across switching costs.",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},
-        ylim=(0, 3500),
+        ylim=None if y_up_lim is None else (0, y_up_lim),
         grid_kwargs={"which": "both", "linestyle": "--", "alpha": 0.5},
+        save_path=save_path,
+        show_plot=show_plot,
     )
 
 def run_omega_sweep(

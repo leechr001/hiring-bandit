@@ -3,6 +3,7 @@ import random
 import sys
 import tempfile
 import unittest
+import math
 from collections import Counter
 from itertools import combinations
 from pathlib import Path
@@ -18,7 +19,10 @@ mpl_dir = Path(tempfile.gettempdir()) / "hiringbandit-mpl"
 mpl_dir.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
-from bijections import optimistic_hire_rank_matching_bijection
+from bijections import (
+    optimistic_hire_rank_matching_bijection,
+    optimistic_hire_switching_threshold,
+)
 from bandit_environment import StepFeedback
 from choose_target import choose_target
 from optimistic_hire import OptimisticHire
@@ -60,6 +64,15 @@ class RegressionTests(unittest.TestCase):
                 seen_remove.add(remove_id)
                 seen_add.add(add_id)
 
+    class _PolicyEnv:
+        def __init__(self, active_set, *, t: int = 1, c: float = 0.0):
+            self.active_set = set(active_set)
+            self.t = t
+            self.c = c
+
+        def validate_replacements(self, replacements) -> None:
+            return None
+
     @staticmethod
     def _bruteforce_choose_target_zero_ucb_bonus(
         *,
@@ -70,27 +83,34 @@ class RegressionTests(unittest.TestCase):
         switching_cost,
     ):
         active = tuple(sorted(active_set))
-        m = len(active)
-        k = len(empirical_means)
         ucb_values = [float(x) for x in empirical_means]
         lcb_values = [float(x) for x in empirical_means]
+        threshold = optimistic_hire_switching_threshold(
+            horizon=horizon,
+            current_period=current_period,
+            switching_cost=switching_cost,
+        )
+        if threshold is None:
+            threshold = 0.0
+        if math.isinf(threshold):
+            objective = sum(ucb_values[worker_id - 1] for worker_id in active)
+            return set(active), tuple(), objective
 
-        best_target = None
-        best_pairs = None
-        best_objective = -float("inf")
+        best_target = set(active)
+        best_pairs = tuple()
+        best_objective = sum(ucb_values[worker_id - 1] for worker_id in active)
 
-        for target in combinations(range(1, k + 1), m):
+        for target in combinations(range(1, len(empirical_means) + 1), len(active)):
             pairs = optimistic_hire_rank_matching_bijection(
                 active,
                 target,
-                lcb_values=lcb_values,
                 ucb_values=ucb_values,
-                current_period=current_period,
-                horizon=horizon,
-                switching_cost=switching_cost,
             )
-            required_switches = len(set(target) - set(active))
-            if len(pairs) != required_switches:
+            total_slack = sum(
+                ucb_values[add_id - 1] - lcb_values[remove_id - 1] - threshold
+                for remove_id, add_id in pairs
+            )
+            if total_slack < -1e-12:
                 continue
 
             objective = sum(ucb_values[worker_id - 1] for worker_id in target)
@@ -112,6 +132,16 @@ class RegressionTests(unittest.TestCase):
     ):
         active = set(active_set)
         k = len(empirical_means)
+        threshold = optimistic_hire_switching_threshold(
+            horizon=horizon,
+            current_period=current_period,
+            switching_cost=switching_cost,
+        )
+        if threshold is None:
+            threshold = 0.0
+        if math.isinf(threshold):
+            objective = sum(empirical_means[worker_id - 1] for worker_id in active)
+            return active, objective
 
         while True:
             best_target = None
@@ -126,16 +156,14 @@ class RegressionTests(unittest.TestCase):
                     pairs = optimistic_hire_rank_matching_bijection(
                         sorted(active),
                         candidate_target,
-                        lcb_values=empirical_means,
                         ucb_values=empirical_means,
-                        current_period=current_period,
-                        horizon=horizon,
-                        switching_cost=switching_cost,
                     )
                     if len(pairs) != 1:
                         continue
 
                     gain = empirical_means[add_id - 1] - empirical_means[remove_id - 1]
+                    if gain + 1e-12 < threshold:
+                        continue
                     if gain > best_gain + 1e-12:
                         best_target = set(candidate_target)
                         best_gain = gain
@@ -224,6 +252,50 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(policy.phase, "ready")
 
+    def test_aht_starts_schedule_immediately_even_with_init_pulls(self) -> None:
+        policy = AgrawalHegdeTeneketzisPolicy(
+            k=5,
+            m=2,
+            init_pulls=2,
+            rng=random.Random(0),
+        )
+        env = self._PolicyEnv({1, 2})
+
+        policy.act(env)
+        env.active_set = set(policy.current_target)
+        policy.update(
+            StepFeedback(
+                individual_rewards={worker_id: 1.0 for worker_id in env.active_set},
+                active_set=frozenset(env.active_set),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+
+        self.assertEqual(policy.phase, "ready")
+        self.assertEqual(policy.frame_f, 0)
+        self.assertEqual(policy.block_i, 1)
+        self.assertEqual(policy.block_len, 1)
+        self.assertEqual(policy.blocks_in_frame, policy.k)
+        self.assertEqual(policy.block_remaining, 0)
+
+    def test_aht_initializes_schedule_before_first_decision(self) -> None:
+        policy = AgrawalHegdeTeneketzisPolicy(
+            k=5,
+            m=2,
+            init_pulls=2,
+            rng=random.Random(0),
+        )
+        env = self._PolicyEnv({1, 2})
+
+        policy.act(env)
+        self.assertEqual(policy.phase, "transition")
+        self.assertEqual(policy.frame_f, 0)
+        self.assertEqual(policy.block_i, 0)
+        self.assertEqual(policy.block_len, 1)
+        self.assertEqual(policy.blocks_in_frame, policy.k)
+        self.assertEqual(policy.block_remaining, 1)
+
     def test_optimistic_hire_counts_first_target_active_period_toward_buffer(self) -> None:
         policy = OptimisticHire(
             k=3,
@@ -270,7 +342,7 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(pairs, [])
 
-    def test_choose_target_uses_horizon_aware_dp(self) -> None:
+    def test_choose_target_uses_horizon_aware_aggregate_dp(self) -> None:
         result = choose_target(
             active_set=[1, 2],
             counts=np.ones(4, dtype=np.int64),
@@ -306,6 +378,35 @@ class RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(target, {1, 3})
+
+    def test_optimistic_hire_uses_aggregate_switching_rule(self) -> None:
+        policy = OptimisticHire(
+            k=5,
+            m=3,
+            gamma=1.0,
+            horizon=10,
+            rng=random.Random(0),
+        )
+        policy.current_target = {1, 2, 3}
+        policy.counts[:] = 1
+        policy.sums[:] = [0.9, 0.8, 0.1, 1.0, 0.95]
+        policy.t = 8
+        policy.cfg.ucb_coef = 0.0
+
+        target = policy.compute_target(
+            active=[1, 2, 3],
+            current_period=8,
+            switching_cost=0.9,
+        )
+        pairs = policy.bijection(
+            current=[1, 2, 3],
+            target=sorted(target),
+            current_period=8,
+            switching_cost=0.9,
+        )
+
+        self.assertEqual(target, {1, 4, 5})
+        self.assertEqual(pairs, [(2, 4), (3, 5)])
 
     def test_choose_target_matches_bruteforce_enumeration_on_small_instance(self) -> None:
         active_set = [1, 2, 3]
@@ -388,6 +489,47 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.matched_pairs, expected_pairs)
         self.assertAlmostEqual(result_objective, expected_objective)
         self.assertGreater(result_objective, greedy_objective)
+
+    def test_choose_target_matches_bruteforce_on_aggregate_instance(
+        self,
+    ) -> None:
+        active_set = [1, 2, 3]
+        empirical_means = [0.9, 0.8, 0.1, 1.0, 0.95]
+        current_period = 8
+        horizon = 10
+        switching_cost = 0.9
+
+        expected_target, expected_pairs, expected_objective = (
+            self._bruteforce_choose_target_zero_ucb_bonus(
+                active_set=active_set,
+                empirical_means=empirical_means,
+                current_period=current_period,
+                horizon=horizon,
+                switching_cost=switching_cost,
+            )
+        )
+
+        result = choose_target(
+            active_set=active_set,
+            counts=[1, 1, 1, 1, 1],
+            empirical_means=empirical_means,
+            current_period=current_period,
+            horizon=horizon,
+            switching_cost=switching_cost,
+            ucb_coef=0.0,
+            time_index=current_period,
+        )
+        result_objective = sum(
+            empirical_means[worker_id - 1]
+            for worker_id in result.target
+        )
+
+        self.assertEqual(expected_target, {1, 4, 5})
+        self.assertEqual(expected_pairs, ((2, 4), (3, 5)))
+        self.assertAlmostEqual(expected_objective, 2.85)
+        self.assertEqual(set(result.target), expected_target)
+        self.assertEqual(result.matched_pairs, expected_pairs)
+        self.assertAlmostEqual(result_objective, expected_objective)
 
     def test_make_policy_resolves_auto_gamma_for_optimistic_hire(self) -> None:
         kwargs = {

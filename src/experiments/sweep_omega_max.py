@@ -9,18 +9,19 @@ k = 150
 m = 100
 T = 5 * 365 * 24
 c = 8
-n_runs = 4
+n_runs = 20
 n_jobs = min(n_runs, 4)
 
 # set common upper limit on y axis for compairson
-y_up_lim = 130000
+y_up_lim = 90000
 
 rng = np.random.default_rng(12345)
 means = rng.uniform(0.3, 0.7, size=k).tolist()
 
 omega_max_values = [1, 8, 24, 7*24]
 policies = [
-    "AHT", "OMM", 
+    "AHT", 
+    "OMM", 
     "Optimistic-Hire"
     ]
 omega_sweeps = ["stochastic", "adversarial",]

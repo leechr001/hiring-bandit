@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 
-from experiments.benchmark_config import (
+from experiments.benchmark_config_2 import (
     average_title,
     curve_cache_mode,
     cumulative_title,

@@ -172,7 +172,7 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
     """Shared transition/hold control flow for policies with delayed switching."""
 
     def reset_policy_state(self) -> None:
-        self.phase = "init"  # init -> ready/warmup -> transition -> hold
+        self.phase = "init"  # init -> ready -> transition -> hold
         self.current_target: Set[int] = set()
         self.reset_control_state()
 
@@ -677,7 +677,6 @@ class AHTConfig:
     m: int
     delta: float
     ucb_coef: float = 2.0
-    init_pulls: int = 0
 
 
 class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
@@ -687,7 +686,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     Notes on inheritance:
     - Inherits validation, empirical statistics, and the transition/hold lifecycle from
       StatefulDelayedActionPolicy.
-    - Supplies the AHT-specific warmup, schedule, and block-length logic through hooks.
+    - Supplies the AHT-specific schedule and block-length logic through hooks.
     """
 
     def __init__(
@@ -699,6 +698,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         rng: Optional[random.Random] = None,
         delta: Optional[float] = None,
         ucb_coef: float = 2.0,
+        # Retained for backward compatibility; AHT now starts scheduling immediately.
         init_pulls: Optional[int] = None,
         # keep DelayedActionPolicy signature compatibility (unused here):
         c: float = 0.0,
@@ -710,13 +710,11 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
             raise ValueError("ucb_coef must be > 0.")
 
         if delta is None:
-            delta = 1.0 / (2.0 * k)
+            delta = 1.0 / (2.0 * m * k)
         if not (0.0 < delta < 1.0 / k):
             raise ValueError("delta must satisfy 0 < delta < 1/k.")
 
-        if init_pulls is None:
-            init_pulls = m
-        if init_pulls < 0:
+        if init_pulls is not None and init_pulls < 0:
             raise ValueError("init_pulls must be >= 0.")
 
         self.cfg = AHTConfig(
@@ -724,7 +722,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
             m=self.m,
             delta=float(delta),
             ucb_coef=float(ucb_coef),
-            init_pulls=int(init_pulls),
         )
 
         # Block scheduling (frames f and blocks i)
@@ -734,8 +731,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         self.block_len: int = 0
         self.block_remaining: int = 0
 
-        # Warmup scheduling
-        self._warmup_queue: List[int] = []
         self.reset()
 
     # ----------------------------
@@ -748,7 +743,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         self.blocks_in_frame = 0
         self.block_len = 0
         self.block_remaining = 0
-        self._warmup_queue = []
 
     def compute_target(self) -> List[int]:
         """
@@ -760,19 +754,9 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     def initialize_control(self, active_now: Sequence[int], env) -> None:
         self.current_target = set(active_now)
         self._initialize_schedule()
-        self._initialize_warmup()
-        self.phase = "warmup" if self.cfg.init_pulls > 0 else "ready"
+        self.phase = "ready"
 
     def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
-        if self.phase == "warmup":
-            desired = self._warmup_target()
-            if desired is None:
-                self.phase = "ready"
-                return None
-
-            self.block_remaining = 1  # warmup plays exactly one period once active
-            return sorted(desired)
-
         if self.phase == "ready":
             desired = self._choose_set_at_comparison_instant()
             self.block_remaining = self.block_len
@@ -799,7 +783,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     def _ucb_values(self) -> np.ndarray:
         """
         Hoeffding-style UCB:
-            U_j(t) = mean_j(t) + sqrt(ucb_coef * log(max(2, k*m*t)) / T_j(t)),
+            U_j(t) = mean_j(t) + sqrt(ucb_coef * log(max(2, t)) / T_j(t)),
             with U_j(t) = +inf when T_j(t) = 0.
         """
         k, m = self.k, self.m
@@ -807,7 +791,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         ucb = np.empty(k, dtype=np.float64)
 
         t_for_log = max(1, self.t)
-        log_term = math.log(max(2, k * m * t_for_log))
+        log_term = math.log(max(2, t_for_log))
 
         for i in range(k):
             n = int(self.counts[i])
@@ -845,27 +829,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
             self.frame_f += 1
             self.block_i = 0
             self._set_frame_params(self.frame_f)
-
-    # ----------------------------
-    # Warm start
-    # ----------------------------
-
-    def _initialize_warmup(self) -> None:
-        self._warmup_queue = list(range(1, self.k + 1))
-        self.rng.shuffle(self._warmup_queue)
-
-    def _warmup_target(self) -> Optional[Set[int]]:
-        if self.cfg.init_pulls <= 0:
-            return None
-        if int(np.min(self.counts)) >= self.cfg.init_pulls:
-            return None
-
-        # Choose m arms with the smallest counts (random tie-breaking).
-        idxs = list(range(self.k))
-        self.rng.shuffle(idxs)
-        idxs.sort(key=lambda i: int(self.counts[i]))
-        chosen = idxs[: self.m]
-        return {i + 1 for i in chosen}
 
     # ----------------------------
     # AHT comparison-instant rule

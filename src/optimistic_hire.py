@@ -1,5 +1,8 @@
 from bandit_environment import StepFeedback
-from bijections import optimistic_hire_rank_matching_bijection
+from bijections import (
+    optimistic_hire_rank_matching_bijection,
+    optimistic_hire_switching_threshold,
+)
 from choose_target import choose_target
 from policies import StatefulDelayedActionPolicy
 
@@ -173,8 +176,8 @@ class OptimisticHire(StatefulDelayedActionPolicy):
 
         This solves the horizon-aware ChooseTarget subproblem from the paper:
         maximize the sum of UCB scores over the target workforce while only
-        allowing rank-matched replacements whose optimistic benefit can recover
-        the switching cost over the remaining horizon.
+        allowing the rank-matched replacements to recover the switching cost in
+        aggregate over the remaining horizon.
         """
         if active is None:
             active = sorted(self.current_target)
@@ -219,11 +222,15 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         switching_cost: float = 0.0,
     ) -> List[Tuple[int, int]]:
         """
-        Construct a rank-matching bijection based on LCB values.
+        Construct a rank-matching bijection based on UCB values.
 
-        If a finite horizon is configured, exclude any pair (i, j) for which
-        UCB(j) - LCB(i) < c / (T - t), where T is the horizon, t is the current
-        period, and c is the switching cost.
+        If a finite horizon is configured, return the full rank-matched
+        replacement set only when
+
+            sum_{(i, j) in pi^R} (UCB(j) - LCB(i)) >= |pi^R| * c / (T - t),
+
+        where T is the horizon, t is the current period, and c is the switching
+        cost. Otherwise return no replacements.
 
         Parameters
         ----------
@@ -238,15 +245,35 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
-        return optimistic_hire_rank_matching_bijection(
+        pairs = optimistic_hire_rank_matching_bijection(
             current,
             target,
-            lcb_values=lcb.tolist(),
             ucb_values=ucb.tolist(),
+        )
+
+        threshold = optimistic_hire_switching_threshold(
             current_period=current_period,
             horizon=self.cfg.horizon,
             switching_cost=switching_cost,
         )
+        if threshold is None:
+            return pairs
+        if math.isinf(threshold):
+            return []
+
+        aggregate_slack = 0.0
+        for remove_id, add_id in pairs:
+            add_ucb = float(ucb[add_id - 1])
+            remove_lcb = float(lcb[remove_id - 1])
+            if math.isinf(add_ucb) and add_ucb > 0.0:
+                return pairs
+            if math.isinf(remove_lcb) and remove_lcb < 0.0:
+                return pairs
+            aggregate_slack += add_ucb - remove_lcb - threshold
+
+        if aggregate_slack >= -1e-12:
+            return pairs
+        return []
 
     def _compute_i_min_and_baseline(self, target: Set[int]) -> Tuple[int, int]:
         """

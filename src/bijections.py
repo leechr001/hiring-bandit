@@ -99,12 +99,12 @@ def oracle_rank_mismatching_bijection(
 def rank_matching_remove_order(
     workers: Sequence[int],
     *,
-    lcb_values: Sequence[float],
+    ucb_values: Sequence[float],
 ) -> List[int]:
-    """Order active workers for pi^R by descending LCB, breaking ties by worker ID."""
+    """Order active workers for pi^R by descending UCB, breaking ties by worker ID."""
     return sorted(
         (int(worker_id) for worker_id in workers),
-        key=lambda worker_id: (float(lcb_values[worker_id - 1]), -worker_id),
+        key=lambda worker_id: (float(ucb_values[worker_id - 1]), -worker_id),
         reverse=True,
     )
 
@@ -139,48 +139,24 @@ def optimistic_hire_switching_threshold(
     return float(switching_cost) / float(remaining_periods)
 
 
-def optimistic_hire_replacement_is_admissible(
-    remove_id: int,
-    add_id: int,
-    *,
-    lcb_values: Sequence[float],
-    ucb_values: Sequence[float],
-    threshold: float,
-) -> bool:
-    """Check whether a rank-matched replacement satisfies the horizon-aware rule."""
-    add_ucb = float(ucb_values[add_id - 1])
-    remove_lcb = float(lcb_values[remove_id - 1])
-
-    if math.isinf(add_ucb) and add_ucb > 0.0:
-        return True
-    if math.isinf(remove_lcb) and remove_lcb < 0.0:
-        return True
-    return add_ucb - remove_lcb >= threshold
-
-
 def optimistic_hire_rank_matching_bijection(
     current: Sequence[int],
     target: Sequence[int],
     *,
-    lcb_values: Sequence[float],
     ucb_values: Sequence[float],
-    current_period: Optional[int] = None,
-    horizon: Optional[int] = None,
-    switching_cost: float = 0.0,
 ) -> List[Tuple[int, int]]:
     """
     Construct the optimistic-hire rank-matching bijection pi^R.
 
-    Removed workers are ordered by descending LCB and added workers are ordered by
-    descending UCB. When a finite horizon is provided, inadmissible pairs are
-    filtered using the threshold c / (T - t).
+    Removed workers are ordered by descending UCB and added workers are ordered by
+    descending UCB.
     """
     cur_set = set(current)
     tar_set = set(target)
 
     remove = rank_matching_remove_order(
         list(cur_set - tar_set),
-        lcb_values=lcb_values,
+        ucb_values=ucb_values,
     )
     add = rank_matching_add_order(
         list(tar_set - cur_set),
@@ -195,25 +171,4 @@ def optimistic_hire_rank_matching_bijection(
         remove = remove[:n]
         add = add[:n]
 
-    pairs = list(zip(remove, add))
-    threshold = optimistic_hire_switching_threshold(
-        horizon=horizon,
-        current_period=current_period,
-        switching_cost=switching_cost,
-    )
-    if threshold is None:
-        return pairs
-    if math.isinf(threshold):
-        return []
-
-    return [
-        (remove_id, add_id)
-        for remove_id, add_id in pairs
-        if optimistic_hire_replacement_is_admissible(
-            remove_id,
-            add_id,
-            lcb_values=lcb_values,
-            ucb_values=ucb_values,
-            threshold=threshold,
-        )
-    ]
+    return list(zip(remove, add))
