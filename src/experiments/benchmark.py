@@ -10,31 +10,31 @@ from simulation import ExperimentSeries
 import numpy as np
 
 k = 150
-m = 15
+m = 50
 T = 5 * 365 * 24
-c = 8
+c = 0
 omega_max = 8
 delay_lower = 8
-n_runs = 4
+n_runs = 20
 n_jobs = min(4, n_runs)
 
 rng = np.random.default_rng(12345)
 means = rng.uniform(0.3, 0.7, size=k).tolist()
 
 series = [
-    # ExperimentSeries(
-    #     policy_name="optimistic-hire",
-    #     label="Optimistic-Hire",
-    #     sim_kwargs={"gamma": "auto"},
-    # ),
-    # ExperimentSeries(
-    #     policy_name="AHT",
-    #     label="AgrawalHegdeTeneketzis",
-    # ),
-    # ExperimentSeries(
-    #     policy_name="OMM",
-    #     label="OMM",
-    # ),
+    ExperimentSeries(
+        policy_name="optimistic-hire",
+        label="Optimistic-Hire",
+        sim_kwargs={"gamma": "auto"},
+    ),
+    ExperimentSeries(
+        policy_name="AHT",
+        label="AgrawalHegdeTeneketzis",
+    ),
+    ExperimentSeries(
+        policy_name="OMM",
+        label="OMM",
+    ),
     # ExperimentSeries(
     #     policy_name="SemiAnnualReview",
     #     label="Semi-Annual Review",
@@ -43,22 +43,11 @@ series = [
     #     policy_name="WorkTrial",
     #     label="WorkTrial",
     # ),
-
-    ExperimentSeries(
-        policy_name="Threshold",
-        label="Threshold (0.55)",
-        sim_kwargs={"threshold": 0.55},
-    ),
-    ExperimentSeries(
-        policy_name="Threshold",
-        label="Threshold (0.6)",
-        sim_kwargs={"threshold": 0.6},
-    ),
-    ExperimentSeries(
-        policy_name="Threshold",
-        label="Threshold (0.65)",
-        sim_kwargs={"threshold": 0.65},
-    ),
+    # ExperimentSeries(
+    #     policy_name="Threshold",
+    #     label="Threshold (0.6)",
+    #     sim_kwargs={"threshold": 0.6},
+    # ),
 ]
 
 simulate_kwargs = {

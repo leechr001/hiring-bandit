@@ -24,7 +24,6 @@ from concurrent.futures import ProcessPoolExecutor
 import math
 import multiprocessing as mp
 import random
-import re
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -83,12 +82,12 @@ def make_delay_sampler_factory(
             rng=_seeded_rng(seed, "delay"),
             delay_lower=delay_lower,
         )
-    if delay_process_name in {"adversarial", "wc"}:
+    if delay_process_name == "adversarial":
         return lambda seed: make_adversarial_delay(
             means=means,
             omega_max=omega_max,
         )
-    if delay_process_name in {"calendar-adversarial", "calendar-wc"}:
+    if delay_process_name == "calendar-adversarial":
         if calendar_frequency is None:
             raise ValueError("calendar_frequency is required for calendar delays.")
 
@@ -117,9 +116,8 @@ def make_delay_sampler_factory(
 
     raise ValueError(
         "delay_process_name must be one of: 'uniform', 'random', "
-        "'stochastic', 'iid', 'adversarial', 'wc', 'calendar', "
-        "'calendar-unif', 'calendar-geom', 'calendar-adversarial', "
-        "or 'calendar-wc'."
+        "'stochastic', 'iid', 'adversarial', 'calendar', "
+        "'calendar-unif', 'calendar-geom', or 'calendar-adversarial'."
     )
 
 
@@ -697,25 +695,26 @@ def make_policy(
     """
     Factory to build a policy object consistent with the simulation interface.
 
-    Supported names (case- and spacing-insensitive after lowercasing/stripping):
-      - "epsilon-greedy", "eps", "epsilon", "egreedy"
-      - "semiannualreview", "semiannual-review", "semi-annual-review"
-      - "worktrial", "work-trial"
-      - "threshold", "threshold-n"
-      - "omm", "optimistic-matroid-maximization", "optimistic matroid maximization"
-      - "optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1", "oh"
-      - "agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"
+    Supported names after lowercasing:
+      - "epsilon-greedy"
+      - "semiannualreview"
+      - "worktrial"
+      - "threshold"
+      - "omm"
+      - "omm-rm"
+      - "omm-rmm"
+      - "optimistic-hire"
+      - "aht"
     """
     name = policy_name.lower().strip()
 
-    # Naive baselines
-    if name in {"eps", "epsilon", "epsilon-greedy", "egreedy"}:
+    if name == "epsilon-greedy":
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
 
-    elif name in {"semiannualreview", "semiannual-review", "semi-annual-review"}:
+    elif name == "semiannualreview":
         return SemiAnnualReview(k=k, m=m, review_interval=review_interval, rng=rng)
 
-    elif name in {"worktrial", "work-trial"}:
+    elif name == "worktrial":
         return WorkTrial(
             k=k,
             m=m,
@@ -726,28 +725,19 @@ def make_policy(
 
     elif name == "threshold":
         return Threshold(k=k, m=m, threshold=threshold, rng=rng)
-    elif threshold_match := re.fullmatch(r"threshold-([0-9]*\.?[0-9]+)", name):
-        parsed_threshold = float(threshold_match.group(1))
-        return Threshold(k=k, m=m, threshold=parsed_threshold, rng=rng)
 
-    elif name in {
-        "omm",
-        "optimistic-matroid-maximization",
-        "optimistic matroid maximization",
-    }:
+    elif name == "omm":
         return OMM(k=k, m=m, alpha=ucb_coef, rng=rng)
-    
-    # Construct OMM with different bijections for experiments.
+
     elif name in {"omm-rm"}:
         return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', rng=rng)
-    
+
     elif name in {"omm-rmm"}:
         return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
 
-    # Adaptive batching algorithm from the paper
-    elif name in {"optimistic-hire", "optimistic hire", "optimistic-hire-auto", "paper", "algorithm-1", "oh"}:
+    elif name == "optimistic-hire":
         resolved_gamma: float
-        if name == "optimistic-hire-auto" or gamma == "auto":
+        if gamma == "auto":
             resolved_gamma = compute_optimistic_hire_auto_gamma(
                 k=k,
                 m=m,
@@ -767,39 +757,8 @@ def make_policy(
             rng=rng,
             log_frontier_sizes=log_frontier_sizes,
         )
-    
-    elif name in {"optimistic-hire-gamma-1"}:
-        return OptimisticHire(
-            k=k,
-            m=m,
-            gamma=(c + omega_max) ** 2 * m,
-            horizon=T,
-            rng=rng,
-            log_frontier_sizes=log_frontier_sizes,
-        )
-    
-    elif name in {"optimistic-hire-gamma-2"}:
-        return OptimisticHire(
-            k=k,
-            m=m,
-            gamma=(c + omega_max) * m,
-            horizon=T,
-            rng=rng,
-            log_frontier_sizes=log_frontier_sizes,
-        )
-    
-    elif name in {"optimistic-hire-gamma-3"}:
-        return OptimisticHire(
-            k=k,
-            m=m,
-            gamma=c * m,
-            horizon=T,
-            rng=rng,
-            log_frontier_sizes=log_frontier_sizes,
-        )
-    
-    # Paper by Agrawal, Hedge, and Teneketzis 
-    elif name in {"agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"}:
+
+    elif name == "aht":
         return AgrawalHegdeTeneketzisPolicy(k=k, m=m, rng=rng)
 
     else:

@@ -19,7 +19,7 @@ n_jobs = 4
 
 means = make_benchmark_means(k=k)
 series = default_benchmark_series(
-    threshold_policy_name="Threshold-0.45",
+    threshold_value=0.45,
     threshold_label="Tuned Threshold (0.45)",
 )
 

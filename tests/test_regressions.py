@@ -866,20 +866,17 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(replacements, [(1, 3)])
 
-    def test_threshold_policy_name_can_encode_threshold_value(self) -> None:
-        policy = make_policy(
-            "threshold-0.75",
-            k=4,
-            m=2,
-            T=10,
-            c=0.0,
-            omega_max=1,
-            rng=random.Random(0),
-        )
-
-        self.assertIsInstance(policy, Threshold)
-        assert isinstance(policy, Threshold)
-        self.assertAlmostEqual(policy.threshold, 0.75)
+    def test_make_policy_rejects_removed_threshold_alias(self) -> None:
+        with self.assertRaises(ValueError):
+            make_policy(
+                "threshold-0.75",
+                k=4,
+                m=2,
+                T=10,
+                c=0.0,
+                omega_max=1,
+                rng=random.Random(0),
+            )
 
     def test_make_policy_builds_semiannual_review_with_custom_interval(self) -> None:
         policy = make_policy(

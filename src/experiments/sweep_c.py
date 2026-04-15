@@ -21,7 +21,7 @@ means = rng.uniform(0.3, 0.7, size=k).tolist()
 c_values = [0, 8, 24, 7*24]
 
 policy_specs = [
-    ("optimistic-hire-auto", "OH"),
+    ("optimistic-hire", "OH"),
     ("AHT", "AHT"),
     ("OMM", "OMM"),
 ]

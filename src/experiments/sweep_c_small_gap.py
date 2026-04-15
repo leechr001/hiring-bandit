@@ -13,12 +13,17 @@ c_values = [1, 5, 10, 15, 30]
 n_runs = 20
 n_jobs = 4
 
-for policy_name in ["optimistic-hire-gamma-1", "optimistic-hire-gamma-2"]:
+gamma_specs = [
+    ("gamma_1", lambda c: (c + omega_max) ** 2 * m),
+    ("gamma_2", lambda c: (c + omega_max) * m),
+]
+
+for gamma_label, gamma_fn in gamma_specs:
     series = [
         ExperimentSeries(
-            policy_name=policy_name,
+            policy_name="optimistic-hire",
             label=rf"$c={float(c):.2f}$",
-            sim_kwargs={"c": float(c)},
+            sim_kwargs={"c": float(c), "gamma": float(gamma_fn(float(c)))},
             plot_kwargs={"linewidth": 2},
         )
         for c in c_values
@@ -35,7 +40,7 @@ for policy_name in ["optimistic-hire-gamma-1", "optimistic-hire-gamma-2"]:
             "n_runs": n_runs,
             "n_jobs": n_jobs,
         },
-        title=rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$",
+        title=rf"Average regret over {n_runs} runs with $\omega_\max = {omega_max}$ ({gamma_label})",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},

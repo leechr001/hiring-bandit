@@ -42,13 +42,14 @@ def make_benchmark_means(
 
 def default_benchmark_series(
     *,
-    threshold_policy_name: str,
+    threshold_value: float,
     threshold_label: str,
 ) -> list[ExperimentSeries]:
     return [
         ExperimentSeries(
-            policy_name="optimistic-hire-auto",
+            policy_name="optimistic-hire",
             label="Optimistic-Hire",
+            sim_kwargs={"gamma": "auto"},
         ),
         ExperimentSeries(
             policy_name="AHT",
@@ -67,8 +68,9 @@ def default_benchmark_series(
             label="WorkTrial",
         ),
         ExperimentSeries(
-            policy_name=threshold_policy_name,
+            policy_name="Threshold",
             label=threshold_label,
+            sim_kwargs={"threshold": threshold_value},
         ),
     ]
 
@@ -345,7 +347,6 @@ def run_benchmark(
     curves_name: str = "benchmark_curves.npz",
     latex_table_name: str = "benchmark_planning_horizons_mean_pm_std.tex",
     metadata_name: str = "benchmark_metadata.json",
-    legacy_csv_name: str = "benchmark_planning_horizons.csv",
     save_artifacts: bool = True,
     show_plots: bool = True,
 ) -> None:
@@ -417,10 +418,6 @@ def run_benchmark(
                 horizons=planning_horizons,
             ),
         )
-
-        csv_path = output_dir / legacy_csv_name
-        if csv_path.exists():
-            csv_path.unlink()
 
         with (output_dir / metadata_name).open("w") as handle:
             json.dump(

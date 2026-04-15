@@ -250,11 +250,8 @@ class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
         epsilon_min: float = 0,
         decay: float = 0.999,
         rng: Optional[random.Random] = None,
-        # keep compatibility with DelayedActionPolicy signature if needed:
-        c: float = 0.0,
-        omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
 
         if not (0.0 <= epsilon <= 1.0):
             raise ValueError("epsilon must be in [0,1].")
@@ -331,11 +328,8 @@ class OMM(EmpiricalDelayedActionPolicy):
         alpha: float = 2.0,
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
-        # keep compatibility with DelayedActionPolicy signature if needed:
-        c: float = 0.0,
-        omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
 
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
@@ -692,11 +686,8 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         rng: Optional[random.Random] = None,
         delta: Optional[float] = None,
         ucb_coef: float = 2.0,
-        # keep DelayedActionPolicy signature compatibility (unused here):
-        c: float = 0.0,
-        omega_max: int = 0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
 
         if ucb_coef <= 0:
             raise ValueError("ucb_coef must be > 0.")
