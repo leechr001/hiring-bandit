@@ -205,6 +205,26 @@ class TemporaryHiringBanditEnv:
             seen_remove.add(i)
             seen_add.add(j)
 
+    def reject_pending_conflicting_replacements(
+        self,
+        replacements: Sequence[Tuple[int, int]],
+    ) -> List[Tuple[int, int]]:
+        """
+        Return the subset of replacements that do not use workers already involved
+        in pending replacements.
+        """
+        accepted: List[Tuple[int, int]] = []
+        pending_workers = self.pending_workers
+
+        for i, j in replacements:
+            remove_id = int(i)
+            add_id = int(j)
+            if remove_id in pending_workers or add_id in pending_workers:
+                continue
+            accepted.append((remove_id, add_id))
+
+        return accepted
+
     def step(
         self,
         replacements: Optional[Sequence[Tuple[int, int]]] = None
@@ -213,7 +233,9 @@ class TemporaryHiringBanditEnv:
         Advance one period.
 
         Args:
-            replacements: sequence of (i, j) pairs initiated at current time t.
+            replacements: sequence of (i, j) pairs proposed at current time t.
+                Any proposal that uses a worker already involved in a pending
+                replacement is rejected and not implemented.
 
         Returns:
             obs: next-period observation dict
@@ -224,13 +246,14 @@ class TemporaryHiringBanditEnv:
         if replacements is None:
             replacements = []
         replacements = list(replacements)
+        accepted_replacements = self.reject_pending_conflicting_replacements(replacements)
 
         # 1) Initiate replacements and pay cost.
-        if replacements:
-            self.validate_replacements(replacements)
+        if accepted_replacements:
+            self.validate_replacements(accepted_replacements)
 
-        cost = self.c * len(replacements)
-        for (i, j) in replacements:
+        cost = self.c * len(accepted_replacements)
+        for (i, j) in accepted_replacements:
             omega = int(self.delay_sampler((i, j), self.t))
             if not (1 <= omega <= self.omega_max):
                 raise ValueError("delay_sampler returned omega outside [1, omega_max].")

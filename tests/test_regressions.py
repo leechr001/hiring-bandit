@@ -23,10 +23,16 @@ from bijections import (
     optimistic_hire_rank_matching_bijection,
     optimistic_hire_switching_threshold,
 )
-from bandit_environment import StepFeedback
+from bandit_environment import PendingReplacement, StepFeedback, TemporaryHiringBanditEnv
 from choose_target import choose_target
 from optimistic_hire import OptimisticHire
-from policies import AgrawalHegdeTeneketzisPolicy, SemiAnnualReview, Threshold, WorkTrial
+from policies import (
+    AgrawalHegdeTeneketzisPolicy,
+    SemiAnnualReview,
+    StatefulDelayedActionPolicy,
+    Threshold,
+    WorkTrial,
+)
 from samplers import (
     make_calendar_adversarial_delay,
     make_calendar_delay_sampler,
@@ -72,6 +78,38 @@ class RegressionTests(unittest.TestCase):
 
         def validate_replacements(self, replacements) -> None:
             return None
+
+    class _PendingPolicyEnv(_PolicyEnv):
+        def __init__(self, active_set, *, pending_pairs, t: int = 1, c: float = 0.0):
+            super().__init__(active_set, t=t, c=c)
+            self.pending = [
+                PendingReplacement(
+                    i=int(remove_id),
+                    j=int(add_id),
+                    start_time=t,
+                    completion_time=t + 2,
+                )
+                for remove_id, add_id in pending_pairs
+            ]
+            self.pending_workers = {
+                worker_id
+                for pending_replacement in self.pending
+                for worker_id in (pending_replacement.i, pending_replacement.j)
+            }
+
+        def can_append_replacement(self, accepted, pair) -> bool:
+            remove_id, add_id = (int(pair[0]), int(pair[1]))
+            if remove_id not in self.active_set:
+                return False
+            if add_id in self.active_set:
+                return False
+            if remove_id in self.pending_workers or add_id in self.pending_workers:
+                return False
+            if remove_id in {existing_remove for existing_remove, _ in accepted}:
+                return False
+            if add_id in {existing_add for _, existing_add in accepted}:
+                return False
+            return True
 
     @staticmethod
     def _bruteforce_choose_target_zero_ucb_bonus(
@@ -232,7 +270,6 @@ class RegressionTests(unittest.TestCase):
         policy = AgrawalHegdeTeneketzisPolicy(
             k=3,
             m=1,
-            init_pulls=1,
             rng=random.Random(0),
         )
         policy.reset()
@@ -252,11 +289,80 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(policy.phase, "ready")
 
-    def test_aht_starts_schedule_immediately_even_with_init_pulls(self) -> None:
+    def test_stateful_policy_base_does_not_block_replacements_during_hold(self) -> None:
+        class _NonBlockingScheduledPolicy(StatefulDelayedActionPolicy):
+            def reset_control_state(self) -> None:
+                return None
+
+            def initialize_control(self, active_now, env) -> None:
+                self.current_target = set(active_now)
+                self.phase = "hold"
+
+            def plan_next_target(self, active_now, env):
+                return [1, 3]
+
+            def on_hold_feedback(self, feedback: StepFeedback) -> None:
+                return None
+
+            def compute_target(self):
+                return [1, 3]
+
+        policy = _NonBlockingScheduledPolicy(k=3, m=2, rng=random.Random(0))
+        policy.reset()
+        env = self._PolicyEnv({1, 2})
+
+        replacements = policy.act(env)
+
+        self.assertEqual(replacements, [(2, 3)])
+        self.assertEqual(policy.current_target, {1, 3})
+        self.assertEqual(policy.phase, "transition")
+
+    def test_policy_does_not_cancel_conflicting_pending_replacements(self) -> None:
+        policy = Threshold(k=4, m=2, threshold=0.0, rng=random.Random(0))
+        env = self._PendingPolicyEnv({1, 2}, pending_pairs=[(1, 3)])
+
+        replacements = policy._propose_replacements_from_target(env, [1, 4])
+
+        self.assertEqual(replacements, [(2, 4)])
+        self.assertEqual([(pending.i, pending.j) for pending in env.pending], [(1, 3)])
+        self.assertEqual(env.pending_workers, {1, 3})
+
+    def test_policy_keeps_aligned_pending_replacements_when_target_matches(self) -> None:
+        policy = Threshold(k=4, m=2, threshold=0.0, rng=random.Random(0))
+        env = self._PendingPolicyEnv({1, 2}, pending_pairs=[(1, 3)])
+
+        replacements = policy._propose_replacements_from_target(env, [2, 3])
+
+        self.assertEqual(replacements, [])
+        self.assertEqual([(pending.i, pending.j) for pending in env.pending], [(1, 3)])
+        self.assertEqual(env.pending_workers, {1, 3})
+
+    def test_environment_rejects_replacements_that_conflict_with_pending(self) -> None:
+        env = TemporaryHiringBanditEnv(
+            k=4,
+            m=2,
+            reward_samplers=[lambda: 0.0 for _ in range(4)],
+            delay_sampler=lambda pair, t: 2,
+            c=1.0,
+            omega_max=2,
+            initial_workforce=[1, 2],
+            rng=random.Random(0),
+        )
+
+        env.step([(1, 3)])
+        _, _, cost, _ = env.step([(1, 4), (2, 4)])
+
+        self.assertEqual(cost, 1.0)
+        self.assertEqual(
+            sorted((pending.i, pending.j) for pending in env.pending),
+            [(1, 3), (2, 4)],
+        )
+        self.assertEqual(env.pending_workers, {1, 2, 3, 4})
+
+    def test_aht_starts_schedule_immediately(self) -> None:
         policy = AgrawalHegdeTeneketzisPolicy(
             k=5,
             m=2,
-            init_pulls=2,
             rng=random.Random(0),
         )
         env = self._PolicyEnv({1, 2})
@@ -272,18 +378,17 @@ class RegressionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(policy.phase, "ready")
+        self.assertEqual(policy.phase, "hold")
         self.assertEqual(policy.frame_f, 0)
-        self.assertEqual(policy.block_i, 1)
-        self.assertEqual(policy.block_len, 1)
+        self.assertEqual(policy.block_i, 0)
+        self.assertEqual(policy.block_len, policy.m)
         self.assertEqual(policy.blocks_in_frame, policy.k)
-        self.assertEqual(policy.block_remaining, 0)
+        self.assertEqual(policy.block_remaining, policy.m - 1)
 
     def test_aht_initializes_schedule_before_first_decision(self) -> None:
         policy = AgrawalHegdeTeneketzisPolicy(
             k=5,
             m=2,
-            init_pulls=2,
             rng=random.Random(0),
         )
         env = self._PolicyEnv({1, 2})
@@ -292,9 +397,9 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(policy.phase, "transition")
         self.assertEqual(policy.frame_f, 0)
         self.assertEqual(policy.block_i, 0)
-        self.assertEqual(policy.block_len, 1)
+        self.assertEqual(policy.block_len, policy.m)
         self.assertEqual(policy.blocks_in_frame, policy.k)
-        self.assertEqual(policy.block_remaining, 1)
+        self.assertEqual(policy.block_remaining, policy.m)
 
     def test_optimistic_hire_counts_first_target_active_period_toward_buffer(self) -> None:
         policy = OptimisticHire(
@@ -308,7 +413,7 @@ class RegressionTests(unittest.TestCase):
         policy.current_target = {1}
         policy.i_min = 1
         policy.i_min_count_at_c = 0
-        policy.buffer_threshold_N = 1
+        policy.block_threshold_N = 1
 
         policy.update(
             StepFeedback(
@@ -320,6 +425,31 @@ class RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.phase, "ready")
+
+    def test_optimistic_hire_waits_for_target_realization_before_becoming_ready(self) -> None:
+        policy = OptimisticHire(
+            k=3,
+            m=1,
+            gamma=1.0,
+            horizon=10,
+            rng=random.Random(0),
+        )
+        policy.phase = "transition"
+        policy.current_target = {1}
+        policy.i_min = 1
+        policy.i_min_count_at_c = 0
+        policy.block_threshold_N = 1
+
+        policy.update(
+            StepFeedback(
+                individual_rewards={1: 1.0},
+                active_set=frozenset({2}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+
+        self.assertEqual(policy.phase, "hold")
 
     def test_optimistic_hire_bijection_returns_no_switches_at_horizon(self) -> None:
         policy = OptimisticHire(
@@ -333,7 +463,7 @@ class RegressionTests(unittest.TestCase):
         policy.sums[:] = 0.5
         policy.t = 5
 
-        pairs = policy.bijection(
+        pairs = policy.construct_bijection(
             current=[1],
             target=[2],
             current_period=5,
@@ -357,6 +487,36 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(set(result.target), {1, 3})
         self.assertEqual(result.matched_pairs, ((2, 3),))
 
+    def test_choose_target_can_record_frontier_sizes(self) -> None:
+        frontier_size_log = []
+
+        choose_target(
+            active_set=[1, 2],
+            counts=[1, 1, 1, 1],
+            empirical_means=[0.5, 0.1, 0.9, 0.55],
+            current_period=8,
+            horizon=10,
+            switching_cost=1.0,
+            ucb_coef=0.0,
+            time_index=8,
+            frontier_size_log=frontier_size_log,
+        )
+
+        self.assertEqual(len(frontier_size_log), 6)
+        self.assertEqual(frontier_size_log[0].active_prefix_size, 0)
+        self.assertEqual(frontier_size_log[0].replacement_count, 0)
+        self.assertEqual(frontier_size_log[0].candidate_count, 1)
+        self.assertEqual(frontier_size_log[0].frontier_size, 1)
+        self.assertTrue(
+            any(
+                record.active_prefix_size == 2
+                and record.replacement_count == 1
+                and record.frontier_size > 0
+                for record in frontier_size_log
+            )
+        )
+        self.assertTrue(all(record.time_index == 8 for record in frontier_size_log))
+
     def test_optimistic_hire_compute_target_respects_switching_constraint(self) -> None:
         policy = OptimisticHire(
             k=4,
@@ -379,6 +539,32 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(target, {1, 3})
 
+    def test_simulate_can_collect_optimistic_hire_frontier_logs(self) -> None:
+        frontier_size_log = []
+
+        simulate(
+            policies=["optimistic-hire"],
+            k=4,
+            m=2,
+            T=5,
+            means=[0.9, 0.7, 0.4, 0.2],
+            omega_max=1,
+            c=0.5,
+            n_runs=1,
+            seed0=7,
+            gamma=1.0,
+            frontier_size_log=frontier_size_log,
+        )
+
+        self.assertTrue(frontier_size_log)
+        self.assertTrue(
+            all(record.policy_name == "optimistic-hire" for record in frontier_size_log)
+        )
+        self.assertTrue(all(record.episode_seed == 7 for record in frontier_size_log))
+        self.assertTrue(
+            all(record.decision_iteration is not None for record in frontier_size_log)
+        )
+
     def test_optimistic_hire_uses_aggregate_switching_rule(self) -> None:
         policy = OptimisticHire(
             k=5,
@@ -398,7 +584,7 @@ class RegressionTests(unittest.TestCase):
             current_period=8,
             switching_cost=0.9,
         )
-        pairs = policy.bijection(
+        pairs = policy.construct_bijection(
             current=[1, 2, 3],
             target=sorted(target),
             current_period=8,

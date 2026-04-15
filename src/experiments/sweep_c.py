@@ -11,7 +11,7 @@ m = 100
 T = 5 * 365 * 24
 omega_max = 1
 delay_lower = 1
-n_runs = 4
+n_runs = 20
 n_jobs = min(n_runs, 4)
 
 base_seed = 12345
@@ -22,8 +22,8 @@ c_values = [0, 8, 24, 7*24]
 
 policy_specs = [
     ("optimistic-hire-auto", "OH"),
-    # ("AHT", "AHT"),
-    # ("OMM", "OMM"),
+    ("AHT", "AHT"),
+    ("OMM", "OMM"),
 ]
 
 output_dir = Path(__file__).resolve().parents[2] / "artifacts" / "sweep_c"

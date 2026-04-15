@@ -93,7 +93,7 @@ class DelayedActionPolicy(ABC):
         target: Sequence[int],
     ) -> List[Tuple[int, int]]:
         target_set = self._normalize_target(target)
-        active = sorted(env.active_set)
+        active = sorted(set(env.active_set))
         proposed = self.build_proposed_replacements(active, target_set, env)
 
         feasible: List[Tuple[int, int]] = []
@@ -120,7 +120,7 @@ class DelayedActionPolicy(ABC):
         Workflow:
           1) compute_target() -> desired worker IDs
           2) propose a bijection between env.active_set and target (via self.bijection)
-          3) greedily keep a maximal feasible subset under env.validate_replacements
+          3) let the environment reject proposals that conflict with pending replacements.
         """
         target = self.compute_target()
         if not target:
@@ -169,7 +169,7 @@ class EmpiricalDelayedActionPolicy(DelayedActionPolicy):
 
 
 class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
-    """Shared transition/hold control flow for policies with delayed switching."""
+    """Shared phase bookkeeping for delayed-action policies with scheduled decisions."""
 
     def reset_policy_state(self) -> None:
         self.phase = "init"  # init -> ready -> transition -> hold
@@ -195,7 +195,7 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
         raise NotImplementedError
 
     def after_feedback(self, feedback: StepFeedback) -> None:
-        if self.phase == "transition" and set(feedback.active_set) == self.current_target:
+        if self.phase == "transition":
             self.phase = "hold"
 
         if self.phase == "hold":
@@ -207,20 +207,14 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
         if self.phase == "init":
             self.initialize_control(active_now, env)
 
-        while True:
-            if self.phase in {"transition", "hold"}:
-                return []
+        target = self.plan_next_target(active_now, env)
+        if target is None:
+            return []
 
-            target = self.plan_next_target(active_now, env)
-            if target is None:
-                if self.phase in {"transition", "hold"}:
-                    return []
-                continue
-
-            normalized_target = self._normalize_target(target)
-            self.current_target = set(normalized_target)
-            self.phase = "transition"
-            return self._propose_replacements_from_target(env, normalized_target)
+        normalized_target = self._normalize_target(target)
+        self.current_target = set(normalized_target)
+        self.phase = "transition"
+        return self._propose_replacements_from_target(env, normalized_target)
 
 
 class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
@@ -698,8 +692,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         rng: Optional[random.Random] = None,
         delta: Optional[float] = None,
         ucb_coef: float = 2.0,
-        # Retained for backward compatibility; AHT now starts scheduling immediately.
-        init_pulls: Optional[int] = None,
         # keep DelayedActionPolicy signature compatibility (unused here):
         c: float = 0.0,
         omega_max: int = 0,
@@ -713,9 +705,6 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
             delta = 1.0 / (2.0 * m * k)
         if not (0.0 < delta < 1.0 / k):
             raise ValueError("delta must satisfy 0 < delta < 1/k.")
-
-        if init_pulls is not None and init_pulls < 0:
-            raise ValueError("init_pulls must be >= 0.")
 
         self.cfg = AHTConfig(
             k=self.k,
@@ -815,7 +804,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     def _set_frame_params(self, f: int) -> None:
         p = self.k
         if f == 0:
-            self.block_len = 1
+            self.block_len = self.m
             self.blocks_in_frame = p
         else:
             self.block_len = f

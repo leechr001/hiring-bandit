@@ -12,7 +12,7 @@ from bijections import (
 
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, MutableSequence, Sequence, Tuple
 
 import numpy as np
 
@@ -24,6 +24,19 @@ Score = Tuple[int, float]
 class ChooseTargetResult:
     target: frozenset[int]
     matched_pairs: Tuple[Tuple[int, int], ...]
+
+
+@dataclass(frozen=True)
+class ChooseTargetFrontierSizeRecord:
+    time_index: int
+    current_period: int | None
+    active_prefix_size: int
+    replacement_count: int
+    candidate_count: int
+    frontier_size: int
+    decision_iteration: int | None = None
+    policy_name: str | None = None
+    episode_seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +262,31 @@ def _best_feasible_frontier_index(
     return lo - 1
 
 
+def _record_frontier_size(
+    frontier_size_log: MutableSequence[ChooseTargetFrontierSizeRecord] | None,
+    *,
+    time_index: int,
+    current_period: int | None,
+    active_prefix_size: int,
+    replacement_count: int,
+    candidate_count: int,
+    frontier_size: int,
+) -> None:
+    if frontier_size_log is None:
+        return
+
+    frontier_size_log.append(
+        ChooseTargetFrontierSizeRecord(
+            time_index=time_index,
+            current_period=current_period,
+            active_prefix_size=active_prefix_size,
+            replacement_count=replacement_count,
+            candidate_count=candidate_count,
+            frontier_size=frontier_size,
+        )
+    )
+
+
 def choose_target(
     *,
     active_set: Sequence[int],
@@ -259,6 +297,7 @@ def choose_target(
     switching_cost: float,
     ucb_coef: float = 1.0,
     time_index: int | None = None,
+    frontier_size_log: MutableSequence[ChooseTargetFrontierSizeRecord] | None = None,
 ) -> ChooseTargetResult:
     """
     Solve the aggregate ChooseTarget optimization via dynamic programming.
@@ -362,6 +401,15 @@ def choose_target(
             took_worker=False,
         )
     ]
+    _record_frontier_size(
+        frontier_size_log,
+        time_index=effective_time_index,
+        current_period=current_period,
+        active_prefix_size=0,
+        replacement_count=0,
+        candidate_count=1,
+        frontier_size=1,
+    )
 
     for i in range(1, n_active + 1):
         worker_id = active_ranked[i - 1]
@@ -400,6 +448,15 @@ def choose_target(
                     )
 
             removal_frontiers[i][r] = _prune_removal_frontier(candidates)
+            _record_frontier_size(
+                frontier_size_log,
+                time_index=effective_time_index,
+                current_period=current_period,
+                active_prefix_size=i,
+                replacement_count=r,
+                candidate_count=len(candidates),
+                frontier_size=len(removal_frontiers[i][r]),
+            )
 
     best_score = active_total_score
     best_r = 0

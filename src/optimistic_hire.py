@@ -3,12 +3,12 @@ from bijections import (
     optimistic_hire_rank_matching_bijection,
     optimistic_hire_switching_threshold,
 )
-from choose_target import choose_target
+from choose_target import ChooseTargetFrontierSizeRecord, choose_target
 from policies import StatefulDelayedActionPolicy
 
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -20,6 +20,7 @@ class OptimisticHireConfig:
     gamma: float
     horizon: Optional[int] = None
     ucb_coef: float = 1.0
+    log_frontier_sizes: bool = False
 
 
 class OptimisticHire(StatefulDelayedActionPolicy):
@@ -36,8 +37,8 @@ class OptimisticHire(StatefulDelayedActionPolicy):
       compute a block threshold N(ell), and identify i_min in U_ell with minimal count
       at iteration start c_ell.
     - Initiate one-for-one replacements to move toward U_ell.
-    - Transition phase: do not initiate further replacements until env.active_set == U_ell.
-    - Block phase: keep the workforce fixed until
+    - Block phase: keep the workforce fixed until the realized active workforce
+      matches the target and
           T_{i_min}(t) - T_{i_min}(c_ell) >= N(ell),
       where T_i is the cumulative number of observed outcomes for worker i.
 
@@ -52,6 +53,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         gamma: float,
         horizon: Optional[int] = None,
         rng: Optional[random.Random] = None,
+        log_frontier_sizes: bool = False,
     ):
         super().__init__(k=k, m=m, rng=rng)
         if gamma <= 0:
@@ -59,9 +61,17 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         if horizon is not None and horizon <= 0:
             raise ValueError("horizon must be > 0 when provided.")
 
-        self.cfg = OptimisticHireConfig(k=k, m=m, gamma=gamma, horizon=horizon)
+        self.cfg = OptimisticHireConfig(
+            k=k,
+            m=m,
+            gamma=gamma,
+            horizon=horizon,
+            log_frontier_sizes=log_frontier_sizes,
+        )
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
+        self.frontier_size_log: List[ChooseTargetFrontierSizeRecord] = []
+        self.last_frontier_size_log: List[ChooseTargetFrontierSizeRecord] = []
 
         # block control state (count-based stopping rule)
         self.i_min: Optional[int] = None                 # 1-indexed worker ID
@@ -79,6 +89,8 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         self.i_min = None
         self.i_min_count_at_c = None
         self.block_threshold_N = 0
+        self.frontier_size_log.clear()
+        self.last_frontier_size_log.clear()
 
     def initialize_control(self, active_now: Sequence[int], _env) -> None:
         self.prev_target = set(active_now)
@@ -100,14 +112,18 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         self.i_min, self.i_min_count_at_c = self._compute_i_min_and_baseline(new_target)
         return sorted(new_target)
 
-    def on_hold_feedback(self, _feedback: StepFeedback) -> None:
+    def on_hold_feedback(self, feedback: StepFeedback) -> None:
         if self.i_min is None or self.i_min_count_at_c is None:
             self.prev_target = set(self.current_target)
             self.phase = "ready"
             return
 
         cur = int(self.counts[self.i_min - 1])
-        if cur - int(self.i_min_count_at_c) >= int(self.block_threshold_N):
+        target_realized = set(feedback.active_set) == set(self.current_target)
+        if (
+            target_realized
+            and cur - int(self.i_min_count_at_c) >= int(self.block_threshold_N)
+        ):
             self.prev_target = set(self.current_target)
             self.phase = "ready"
     
@@ -182,6 +198,10 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         if active is None:
             active = sorted(self.current_target)
 
+        frontier_size_log: List[ChooseTargetFrontierSizeRecord] | None = None
+        if self.cfg.log_frontier_sizes:
+            frontier_size_log = []
+
         result = choose_target(
             active_set=active,
             counts=self.counts.tolist(),
@@ -191,7 +211,17 @@ class OptimisticHire(StatefulDelayedActionPolicy):
             switching_cost=switching_cost,
             ucb_coef=self.cfg.ucb_coef,
             time_index=self.t,
+            frontier_size_log=frontier_size_log,
         )
+
+        if frontier_size_log is not None:
+            annotated_records = [
+                replace(record, decision_iteration=self.iterations)
+                for record in frontier_size_log
+            ]
+            self.last_frontier_size_log = annotated_records
+            self.frontier_size_log.extend(annotated_records)
+
         return set(result.target)
 
     def compute_block_length(self, target: Set[int]) -> int:
@@ -213,7 +243,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
 
         return max(1, int(math.ceil(min(vals))))
 
-    def bijection(
+    def construct_bijection(
         self,
         current: Sequence[int],
         target: Sequence[int],
@@ -305,7 +335,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         target: Sequence[int],
         env,
     ) -> List[Tuple[int, int]]:
-        return self.bijection(
+        return self.construct_bijection(
             active,
             target,
             current_period=env.t,

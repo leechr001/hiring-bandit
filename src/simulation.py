@@ -8,6 +8,7 @@ from policies import (
     AgrawalHegdeTeneketzisPolicy
 )
 
+from choose_target import ChooseTargetFrontierSizeRecord
 from optimistic_hire import OptimisticHire
 from samplers import (
     make_bernoulli_samplers, 
@@ -18,7 +19,7 @@ from samplers import (
     make_adversarial_delay
 )
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from concurrent.futures import ProcessPoolExecutor
 import math
 import multiprocessing as mp
@@ -691,6 +692,7 @@ def make_policy(
     threshold: float = 0.5,
     ucb_coef: float = 2.0,
     gamma: float | str = "auto",
+    log_frontier_sizes: bool = False,
 ):
     """
     Factory to build a policy object consistent with the simulation interface.
@@ -757,16 +759,44 @@ def make_policy(
             raise ValueError("gamma must be a positive float or 'auto'.")
         else:
             resolved_gamma = float(gamma)
-        return OptimisticHire(k=k, m=m, gamma=resolved_gamma, horizon=T, rng=rng)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=resolved_gamma,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+        )
     
     elif name in {"optimistic-hire-gamma-1"}:
-        return OptimisticHire(k=k, m=m, gamma=(c+omega_max)**2 * m, horizon=T, rng=rng)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=(c + omega_max) ** 2 * m,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+        )
     
     elif name in {"optimistic-hire-gamma-2"}:
-        return OptimisticHire(k=k, m=m, gamma=(c+omega_max) * m, horizon=T, rng=rng)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=(c + omega_max) * m,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+        )
     
     elif name in {"optimistic-hire-gamma-3"}:
-        return OptimisticHire(k=k, m=m, gamma=c * m, horizon=T, rng=rng)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=c * m,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+        )
     
     # Paper by Agrawal, Hedge, and Teneketzis 
     elif name in {"agrawalhegdeteneketzis", "classic", "rarely-switch", "round-robin", "aht"}:
@@ -793,6 +823,7 @@ def run_episode(
     c: float,
     omega_max: int,
     seed: int,
+    frontier_size_log: list[ChooseTargetFrontierSizeRecord] | None = None,
 ) -> np.ndarray:
     rng = random.Random(seed)
 
@@ -824,7 +855,8 @@ def run_episode(
         work_trial_rotation_periods=work_trial_rotation_periods,
         threshold=threshold,
         ucb_coef=2.0,  # adjust if you want different default exploration strength
-        gamma=gamma
+        gamma=gamma,
+        log_frontier_sizes=frontier_size_log is not None,
     )
 
     oracle_per_period = env.optimal_expected_reward()
@@ -835,8 +867,6 @@ def run_episode(
 
     for _ in range(T):
         replacements = policy.act(env)
-        env.validate_replacements(replacements)
-
         obs, total_reward, cost, feedback = env.step(replacements)
 
         policy.update(feedback)
@@ -846,6 +876,12 @@ def run_episode(
 
         # Pseudo-regret increment: gap to oracle + switching cost
         regret_increments[env.t - 2] = (oracle_per_period - active_expected) + cost
+
+    if frontier_size_log is not None and isinstance(policy, OptimisticHire):
+        frontier_size_log.extend(
+            replace(record, policy_name=policy_name, episode_seed=seed)
+            for record in policy.frontier_size_log
+        )
 
     return np.cumsum(regret_increments)
 
@@ -943,6 +979,7 @@ def simulate(
     gamma: float | str = "auto",
     c: float = 1,
     omega_max: int = 3,
+    frontier_size_log: list[ChooseTargetFrontierSizeRecord] | None = None,
     n_runs: int = 50,
     n_jobs: int = 1,
     seed0: int = 0,
@@ -984,6 +1021,10 @@ def simulate(
 
     if n_jobs < 1:
         raise ValueError("n_jobs must be >= 1.")
+    if n_jobs > 1 and frontier_size_log is not None:
+        raise ValueError(
+            "Frontier-size logging is currently supported only when n_jobs == 1."
+        )
     if n_jobs > 1 and (
         user_supplied_reward_samplers
         or user_supplied_delay_sampler
@@ -1032,6 +1073,7 @@ def simulate(
                         c=c,
                         omega_max=omega_max,
                         seed=episode_seed,
+                        frontier_size_log=frontier_size_log,
                     )
                 )
         else:
