@@ -50,6 +50,9 @@ class DelayedActionPolicy(ABC):
 
         # Default seeded RNG for reproducibility unless caller supplies one.
         self.rng = rng or random.Random(123)
+        self.last_target: List[int] = []
+        self.last_requested_replacements: List[Tuple[int, int]] = []
+        self.last_feasible_replacements: List[Tuple[int, int]] = []
 
     @abstractmethod
     def reset(self) -> None:
@@ -79,6 +82,11 @@ class DelayedActionPolicy(ABC):
             )
         return target_set
 
+    def _clear_replacement_diagnostics(self) -> None:
+        self.last_target = []
+        self.last_requested_replacements = []
+        self.last_feasible_replacements = []
+
     def build_proposed_replacements(
         self,
         active: Sequence[int],
@@ -95,6 +103,11 @@ class DelayedActionPolicy(ABC):
         target_set = self._normalize_target(target)
         active = sorted(set(env.active_set))
         proposed = self.build_proposed_replacements(active, target_set, env)
+        self.last_target = list(target_set)
+        self.last_requested_replacements = [
+            (int(remove_id), int(add_id))
+            for remove_id, add_id in proposed
+        ]
 
         feasible: List[Tuple[int, int]] = []
         for pair in proposed:
@@ -111,6 +124,10 @@ class DelayedActionPolicy(ABC):
             else:
                 feasible.append(pair)
 
+        self.last_feasible_replacements = [
+            (int(remove_id), int(add_id))
+            for remove_id, add_id in feasible
+        ]
         return feasible
 
     def act(self, env) -> List[Tuple[int, int]]:
@@ -124,6 +141,7 @@ class DelayedActionPolicy(ABC):
         """
         target = self.compute_target()
         if not target:
+            self._clear_replacement_diagnostics()
             return []
         return self._propose_replacements_from_target(env, target)
 
@@ -141,6 +159,7 @@ class EmpiricalDelayedActionPolicy(DelayedActionPolicy):
         self.counts.fill(0)
         self.sums.fill(0.0)
         self.t = 0
+        self._clear_replacement_diagnostics()
         self.reset_policy_state()
 
     def reset_policy_state(self) -> None:
@@ -209,6 +228,7 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
 
         target = self.plan_next_target(active_now, env)
         if target is None:
+            self._clear_replacement_diagnostics()
             return []
 
         normalized_target = self._normalize_target(target)

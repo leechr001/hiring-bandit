@@ -104,13 +104,13 @@ def make_uniform_delay_sampler(
     omega_max: int,
     rng=None,
     *,
-    delay_lower: int = 1,
+    delay_lower: int = 0,
 ):
     """
     Generates delay completion times as iid uniform process.
     """
-    if delay_lower < 1:
-        raise ValueError("delay_lower must be >= 1.")
+    if delay_lower < 0:
+        raise ValueError("delay_lower must be >= 0.")
     if delay_lower > omega_max:
         raise ValueError("delay_lower must be <= omega_max.")
     rng = rng or random.Random()
@@ -126,8 +126,8 @@ def _validate_calendar_delay_params(
     omega_max: int,
     frequency: int,
 ) -> None:
-    if omega_max < 1:
-        raise ValueError("omega_max must be >= 1.")
+    if omega_max < 0:
+        raise ValueError("omega_max must be >= 0.")
     if frequency < 1:
         raise ValueError("frequency must be >= 1.")
 
@@ -140,9 +140,9 @@ def _calendar_feasible_delays(t: int, *, omega_max: int, frequency: int) -> Sequ
     if t < 1:
         raise ValueError("t must be >= 1.")
 
-    first_delay = frequency - (t % frequency)
-    if first_delay == 0:
-        first_delay = frequency
+    # Allow immediate completion when the current period already lies on the
+    # calendar and omega = 0 is permitted.
+    first_delay = (-t) % frequency
 
     return list(range(first_delay, omega_max + 1, frequency))
 
@@ -179,7 +179,7 @@ def make_calendar_delay_sampler(
 
     Example: if periods are hours and ``frequency=8``, then a replacement started
     at time ``t`` may only complete at times ``t + omega`` that are multiples of 8.
-    Feasible delays are therefore the positive values in ``[1, omega_max]`` such
+    Feasible delays are therefore the nonnegative values in ``[0, omega_max]`` such
     that ``(t + omega) % frequency == 0``.
 
     Parameters
@@ -240,10 +240,10 @@ def make_adversarial_delay(means: Sequence[float], omega_max:int):
     """
     def sampler(pair: Tuple[int, int], t: int) -> int:
         i,j = pair
-        # if replacement is worse, execute imediately.
+        # If the replacement is worse, execute it immediately.
         # 1-indexed because matches paper and I like confusing code.
         if means[i-1] >= means[j-1]:
-            return 1
+            return 0
         return omega_max
 
     return sampler

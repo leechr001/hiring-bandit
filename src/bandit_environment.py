@@ -33,6 +33,9 @@ class StepFeedback:
     active_set: FrozenSet[int]
     completed_this_period: Tuple[Tuple[int, int], ...]
     pending_count: int
+    requested_replacements: Tuple[Tuple[int, int], ...] = ()
+    accepted_replacements: Tuple[Tuple[int, int], ...] = ()
+    accepted_delays: Tuple[int, ...] = ()
 
 
 class TemporaryHiringBanditEnv:
@@ -45,9 +48,13 @@ class TemporaryHiringBanditEnv:
 
     Period t proceeds in three stages:
       1) Agent initiates replacements R_t, paying c * |R_t|.
-      2) Previously initiated replacements that complete at t are realized,
+      2) All initiated replacements with completion time t are realized,
          updating the active roster A_t.
       3) Active workers generate individual rewards; the period reward is their sum.
+
+    When a newly initiated replacement is assigned omega = 0, it is appended to
+    the pending list with completion_time = t and therefore realizes in the same
+    call to step(), before rewards are generated for period t.
     """
 
     def __init__(
@@ -67,8 +74,8 @@ class TemporaryHiringBanditEnv:
             raise ValueError("k must be >= 2.")
         if not (1 <= m < k):
             raise ValueError("m must satisfy 1 <= m < k.")
-        if omega_max < 1:
-            raise ValueError("omega_max must be >= 1.")
+        if omega_max < 0:
+            raise ValueError("omega_max must be >= 0.")
         if c < 0:
             raise ValueError("c must be nonnegative.")
 
@@ -247,6 +254,7 @@ class TemporaryHiringBanditEnv:
             replacements = []
         replacements = list(replacements)
         accepted_replacements = self.reject_pending_conflicting_replacements(replacements)
+        accepted_delays: List[int] = []
 
         # 1) Initiate replacements and pay cost.
         if accepted_replacements:
@@ -255,8 +263,9 @@ class TemporaryHiringBanditEnv:
         cost = self.c * len(accepted_replacements)
         for (i, j) in accepted_replacements:
             omega = int(self.delay_sampler((i, j), self.t))
-            if not (1 <= omega <= self.omega_max):
-                raise ValueError("delay_sampler returned omega outside [1, omega_max].")
+            if not (0 <= omega <= self.omega_max):
+                raise ValueError("delay_sampler returned omega outside [0, omega_max].")
+            accepted_delays.append(omega)
             self.pending.append(
                 PendingReplacement(
                     i=i,
@@ -298,6 +307,9 @@ class TemporaryHiringBanditEnv:
             active_set=frozenset(self.active_set),
             completed_this_period=tuple((pr.i, pr.j) for pr in completing),
             pending_count=len(self.pending),
+            requested_replacements=tuple((int(i), int(j)) for i, j in replacements),
+            accepted_replacements=tuple((int(i), int(j)) for i, j in accepted_replacements),
+            accepted_delays=tuple(int(delay) for delay in accepted_delays),
         )
 
         # Advance time

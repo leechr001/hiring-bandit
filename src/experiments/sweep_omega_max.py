@@ -18,7 +18,7 @@ y_up_lim = 90000
 rng = np.random.default_rng(12345)
 means = rng.uniform(0.3, 0.7, size=k).tolist()
 
-omega_max_values = [1, 8, 24, 7*24]
+omega_max_values = [0, 8, 24, 7*24]
 policies = [
     "AHT", 
     "OMM", 

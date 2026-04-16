@@ -71,7 +71,7 @@ def make_delay_sampler_factory(
     *,
     means: Sequence[float],
     omega_max: int,
-    delay_lower: int = 1,
+    delay_lower: int = 0,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -704,7 +704,12 @@ def make_policy(
       - "omm-rm"
       - "omm-rmm"
       - "optimistic-hire"
+      - "optimistic-hire-fixed-calendar"
+      - "optimistic-hire-no-screen"
+      - "optimistic-hire-random-pairing"
       - "aht"
+      - "aht-rm"
+      - "aht-rmm"
     """
     name = policy_name.lower().strip()
 
@@ -758,8 +763,77 @@ def make_policy(
             log_frontier_sizes=log_frontier_sizes,
         )
 
+    elif name == "optimistic-hire-fixed-calendar":
+        resolved_gamma = compute_optimistic_hire_auto_gamma(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        ) if gamma == "auto" else float(gamma)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=resolved_gamma,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+            switching_mode="fixed-calendar",
+        )
+
+    elif name == "optimistic-hire-no-screen":
+        resolved_gamma = compute_optimistic_hire_auto_gamma(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        ) if gamma == "auto" else float(gamma)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=resolved_gamma,
+            horizon=None,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+        )
+
+    elif name == "optimistic-hire-random-pairing":
+        resolved_gamma = compute_optimistic_hire_auto_gamma(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_max=omega_max,
+        ) if gamma == "auto" else float(gamma)
+        return OptimisticHire(
+            k=k,
+            m=m,
+            gamma=resolved_gamma,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+            pairing_rule="random",
+        )
+
     elif name == "aht":
         return AgrawalHegdeTeneketzisPolicy(k=k, m=m, rng=rng)
+
+    elif name in {"aht-rm"}:
+        return AgrawalHegdeTeneketzisPolicy(
+            k=k,
+            m=m,
+            bijection_name="oracle-match",
+            rng=rng,
+        )
+
+    elif name in {"aht-rmm"}:
+        return AgrawalHegdeTeneketzisPolicy(
+            k=k,
+            m=m,
+            bijection_name="oracle-mismatch",
+            rng=rng,
+        )
 
     else:
         raise ValueError(f"Unknown policy_name: {policy_name}")
@@ -926,7 +1000,7 @@ def simulate(
     reward_lower: float = 0.0,
     reward_upper: float = 1.0,
     delay_process_name: str = "uniform",
-    delay_lower: int = 1,
+    delay_lower: int = 0,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1102,7 +1176,7 @@ def run_policy_comparisons(
     omega_max: int,
     means: Sequence[float],
     delay_process_name: str = 'uniform',
-    delay_lower: int = 1,
+    delay_lower: int = 0,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1206,7 +1280,7 @@ def run_c_sweep(
     c_values: Sequence[float],
     omega_max: int,
     delay_process_name: str = "uniform",
-    delay_lower: int = 1,
+    delay_lower: int = 0,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1288,7 +1362,7 @@ def run_omega_sweep(
         omega_value = float(value)
         rounded_value = int(round(omega_value))
         if omega_process == "stochastic" and omega_value_type == "max":
-            delay_lower = max(1, int(math.ceil(stochastic_lower_fraction * omega_value)))
+            delay_lower = max(0, int(math.ceil(stochastic_lower_fraction * omega_value)))
             delay_upper = max(delay_lower, rounded_value)
             return (
                 rf"$\omega_\max={rounded_value}$",
@@ -1301,7 +1375,7 @@ def run_omega_sweep(
 
         if omega_process == "stochastic" and omega_value_type == "mean":
             radius = stochastic_radius_scale * omega_value
-            delay_lower = max(1, int(math.ceil(omega_value - radius)))
+            delay_lower = max(0, int(math.ceil(omega_value - radius)))
             delay_upper = max(delay_lower, int(math.floor(omega_value + radius)))
             expected_delay = 0.5 * (delay_lower + delay_upper)
             return (

@@ -2,12 +2,14 @@ from bandit_environment import StepFeedback
 from bijections import (
     optimistic_hire_rank_matching_bijection,
     optimistic_hire_switching_threshold,
+    random_bijection,
 )
 from choose_target import ChooseTargetFrontierSizeRecord, choose_target
 from policies import StatefulDelayedActionPolicy
 
 import math
 import random
+import time
 from dataclasses import dataclass, replace
 from typing import List, Optional, Sequence, Set, Tuple
 
@@ -21,6 +23,8 @@ class OptimisticHireConfig:
     horizon: Optional[int] = None
     ucb_coef: float = 1.0
     log_frontier_sizes: bool = False
+    switching_mode: str = "adaptive-count"
+    pairing_rule: str = "rank-matching"
 
 
 class OptimisticHire(StatefulDelayedActionPolicy):
@@ -42,7 +46,10 @@ class OptimisticHire(StatefulDelayedActionPolicy):
           T_{i_min}(t) - T_{i_min}(c_ell) >= N(ell),
       where T_i is the cumulative number of observed outcomes for worker i.
 
-    The policy is anytime (does not require horizon T).
+    The main paper studies the finite-horizon version with horizon-aware
+    screening. The implementation also supports ablation variants with no
+    screening, a fully preset calendar-time switching rule, or alternative
+    pairing rules.
     """
 
     def __init__(
@@ -54,12 +61,29 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         horizon: Optional[int] = None,
         rng: Optional[random.Random] = None,
         log_frontier_sizes: bool = False,
+        switching_mode: str = "adaptive-count",
+        pairing_rule: str = "rank-matching",
     ):
         super().__init__(k=k, m=m, rng=rng)
         if gamma <= 0:
             raise ValueError("gamma must be > 0.")
         if horizon is not None and horizon <= 0:
             raise ValueError("horizon must be > 0 when provided.")
+        switching_mode_normalized = switching_mode.strip().lower()
+        if switching_mode_normalized not in {"adaptive-count", "fixed-calendar"}:
+            raise ValueError(
+                "switching_mode must be 'adaptive-count' or 'fixed-calendar'."
+            )
+        if switching_mode_normalized == "fixed-calendar" and horizon is None:
+            raise ValueError(
+                "fixed-calendar mode requires a finite horizon so the switching "
+                "calendar can be precomputed before the run starts."
+            )
+        pairing_rule_normalized = pairing_rule.strip().lower()
+        if pairing_rule_normalized not in {"rank-matching", "random"}:
+            raise ValueError(
+                "pairing_rule must be 'rank-matching' or 'random'."
+            )
 
         self.cfg = OptimisticHireConfig(
             k=k,
@@ -67,16 +91,23 @@ class OptimisticHire(StatefulDelayedActionPolicy):
             gamma=gamma,
             horizon=horizon,
             log_frontier_sizes=log_frontier_sizes,
+            switching_mode=switching_mode_normalized,
+            pairing_rule=pairing_rule_normalized,
         )
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
         self.frontier_size_log: List[ChooseTargetFrontierSizeRecord] = []
         self.last_frontier_size_log: List[ChooseTargetFrontierSizeRecord] = []
+        self.selection_runtime_log: List[float] = []
+        self.last_selection_runtime: float = 0.0
 
         # block control state (count-based stopping rule)
         self.i_min: Optional[int] = None                 # 1-indexed worker ID
         self.i_min_count_at_c: Optional[int] = None      # T_{i_min}(c_ell)
         self.block_threshold_N: int = 0                  # N(ell)
+        self.switch_time_baseline: Optional[int] = None  # calendar baseline for ablations
+        self.fixed_calendar_switch_times: List[int] = []
+        self.next_fixed_calendar_idx: int = 0
         self.reset()
 
     # ----------------------------
@@ -89,17 +120,41 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         self.i_min = None
         self.i_min_count_at_c = None
         self.block_threshold_N = 0
+        self.switch_time_baseline = None
+        self.fixed_calendar_switch_times.clear()
+        self.next_fixed_calendar_idx = 0
         self.frontier_size_log.clear()
         self.last_frontier_size_log.clear()
+        self.selection_runtime_log.clear()
+        self.last_selection_runtime = 0.0
 
-    def initialize_control(self, active_now: Sequence[int], _env) -> None:
+    def initialize_control(self, active_now: Sequence[int], env) -> None:
         self.prev_target = set(active_now)
         self.current_target = set(active_now)
+        if self.cfg.switching_mode == "fixed-calendar":
+            self._initialize_fixed_calendar(start_time=int(env.t))
         self.phase = "ready"
 
     def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
         if self.phase != "ready":
             return None
+
+        if self.cfg.switching_mode == "fixed-calendar":
+            next_switch_time = self._next_fixed_calendar_switch_time()
+            if next_switch_time is None or int(env.t) < next_switch_time:
+                return None
+            self._advance_fixed_calendar()
+            self.iterations += 1
+            self.i_min = None
+            self.i_min_count_at_c = None
+            self.block_threshold_N = 0
+            self.switch_time_baseline = None
+            new_target = self.compute_target(
+                active=active_now,
+                current_period=env.t,
+                switching_cost=env.c,
+            )
+            return sorted(new_target)
 
         self.iterations += 1
 
@@ -110,20 +165,30 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         )
         self.block_threshold_N = self.compute_block_length(new_target)
         self.i_min, self.i_min_count_at_c = self._compute_i_min_and_baseline(new_target)
+        self.switch_time_baseline = int(self.t)
         return sorted(new_target)
 
     def on_hold_feedback(self, feedback: StepFeedback) -> None:
+        if self.cfg.switching_mode == "fixed-calendar":
+            # The non-adaptive ablation follows a review calendar computed
+            # before the episode starts. Once a period's feedback arrives, the
+            # policy is immediately eligible to check whether the next preset
+            # decision time has been reached.
+            self.phase = "ready"
+            return
+
         if self.i_min is None or self.i_min_count_at_c is None:
             self.prev_target = set(self.current_target)
             self.phase = "ready"
             return
 
         cur = int(self.counts[self.i_min - 1])
-        target_realized = set(feedback.active_set) == set(self.current_target)
-        if (
-            target_realized
-            and cur - int(self.i_min_count_at_c) >= int(self.block_threshold_N)
-        ):
+        if self.cfg.switching_mode == "adaptive-count":
+            ready_to_switch = (
+                set(feedback.active_set) == set(self.current_target)
+                and cur - int(self.i_min_count_at_c) >= int(self.block_threshold_N)
+            )
+        if ready_to_switch:
             self.prev_target = set(self.current_target)
             self.phase = "ready"
     
@@ -202,6 +267,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         if self.cfg.log_frontier_sizes:
             frontier_size_log = []
 
+        start_time = time.perf_counter()
         result = choose_target(
             active_set=active,
             counts=self.counts.tolist(),
@@ -213,6 +279,8 @@ class OptimisticHire(StatefulDelayedActionPolicy):
             time_index=self.t,
             frontier_size_log=frontier_size_log,
         )
+        self.last_selection_runtime = time.perf_counter() - start_time
+        self.selection_runtime_log.append(self.last_selection_runtime)
 
         if frontier_size_log is not None:
             annotated_records = [
@@ -243,6 +311,52 @@ class OptimisticHire(StatefulDelayedActionPolicy):
 
         return max(1, int(math.ceil(min(vals))))
 
+    def _fixed_calendar_block_length(self, baseline_count: int) -> int:
+        """
+        Deterministic block length used by the fixed-calendar ablation.
+
+        The calendar is computed before the run starts, so it cannot depend on
+        realized counts, realized active sets, or replacement completions. We
+        therefore use the same functional form as the adaptive rule but evolve
+        it on a deterministic proxy sequence in which the least-observed target
+        worker is assumed to accrue one observation per period between review
+        epochs.
+        """
+        gamma = self.cfg.gamma
+        return max(1, int(math.ceil(2.0 * math.sqrt(gamma * baseline_count) + gamma)))
+
+    def _initialize_fixed_calendar(self, *, start_time: int) -> None:
+        if self.cfg.horizon is None:
+            raise RuntimeError(
+                "fixed-calendar mode requires a finite horizon to precompute the "
+                "switching calendar."
+            )
+
+        episode_end_time = int(start_time) + int(self.cfg.horizon) - 1
+        switch_times = [int(start_time)]
+        baseline_count = 0
+        current_time = int(start_time)
+
+        while True:
+            block_length = self._fixed_calendar_block_length(baseline_count)
+            baseline_count += block_length
+            current_time = int(start_time) + baseline_count
+            if current_time > episode_end_time:
+                break
+            switch_times.append(current_time)
+
+        self.fixed_calendar_switch_times = switch_times
+        self.next_fixed_calendar_idx = 0
+
+    def _next_fixed_calendar_switch_time(self) -> Optional[int]:
+        if self.next_fixed_calendar_idx >= len(self.fixed_calendar_switch_times):
+            return None
+        return int(self.fixed_calendar_switch_times[self.next_fixed_calendar_idx])
+
+    def _advance_fixed_calendar(self) -> None:
+        if self.next_fixed_calendar_idx < len(self.fixed_calendar_switch_times):
+            self.next_fixed_calendar_idx += 1
+
     def construct_bijection(
         self,
         current: Sequence[int],
@@ -252,12 +366,12 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         switching_cost: float = 0.0,
     ) -> List[Tuple[int, int]]:
         """
-        Construct a rank-matching bijection based on UCB values.
+        Construct the configured replacement bijection.
 
-        If a finite horizon is configured, return the full rank-matched
-        replacement set only when
+        If a finite horizon is configured, return the full replacement set only
+        when
 
-            sum_{(i, j) in pi^R} (UCB(j) - LCB(i)) >= |pi^R| * c / (T - t),
+            sum_{(i, j)} (UCB(j) - LCB(i)) >= |pi| * c / (T - t),
 
         where T is the horizon, t is the current period, and c is the switching
         cost. Otherwise return no replacements.
@@ -275,11 +389,18 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
-        pairs = optimistic_hire_rank_matching_bijection(
-            current,
-            target,
-            ucb_values=ucb.tolist(),
-        )
+        if self.cfg.pairing_rule == "rank-matching":
+            pairs = optimistic_hire_rank_matching_bijection(
+                current,
+                target,
+                ucb_values=ucb.tolist(),
+            )
+        else:
+            pairs = random_bijection(
+                current,
+                target,
+                rng=self.rng,
+            )
 
         threshold = optimistic_hire_switching_threshold(
             current_period=current_period,

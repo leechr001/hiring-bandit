@@ -9,8 +9,8 @@ from simulation import run_c_sweep
 k = 150
 m = 100
 T = 5 * 365 * 24
-omega_max = 1
-delay_lower = 1
+omega_max = 0
+delay_lower = 0
 n_runs = 20
 n_jobs = min(n_runs, 4)
 
