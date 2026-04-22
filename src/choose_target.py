@@ -58,9 +58,9 @@ def _validate_inputs(
     active_set: Sequence[int],
     counts: Sequence[int],
     empirical_means: Sequence[float],
-    current_period: int | None,
+    current_period: int,
     time_index: int | None,
-    horizon: int | None,
+    horizon: int,
     switching_cost: float,
     ucb_coef: float,
 ) -> None:
@@ -82,8 +82,8 @@ def _validate_inputs(
         raise ValueError("current_period must be non-negative.")
     if time_index is not None and time_index < 0:
         raise ValueError("time_index must be non-negative.")
-    if horizon is not None and horizon <= 0:
-        raise ValueError("horizon must be positive when provided.")
+    if horizon <= 0:
+        raise ValueError("horizon-aware ChooseTarget requires a positive finite horizon.")
     if switching_cost < 0.0:
         raise ValueError("switching_cost must be non-negative.")
     if ucb_coef < 0.0:
@@ -292,8 +292,8 @@ def choose_target(
     active_set: Sequence[int],
     counts: Sequence[int],
     empirical_means: Sequence[float],
-    current_period: int | None,
-    horizon: int | None,
+    current_period: int,
+    horizon: int,
     switching_cost: float,
     ucb_coef: float = 1.0,
     time_index: int | None = None,
@@ -308,11 +308,11 @@ def choose_target(
     side exactly via a cardinality-constrained knapsack frontier that minimizes
     removed UCB subject to the aggregate LCB budget.
 
-    The aggregate constraint is:
+    The aggregate horizon-aware screening constraint is:
 
         sum_{(j, i) in pi^R} (UCB_i - LCB_j) >= (# replacements) * c / (T - t)
 
-    when a finite horizon is active.
+    where T is the known horizon and t is the current period.
     """
     _validate_inputs(
         active_set=active_set,
@@ -346,10 +346,9 @@ def choose_target(
         current_period=current_period,
         switching_cost=switching_cost,
     )
-    if threshold is not None and math.isinf(threshold):
+    assert threshold is not None
+    if math.isinf(threshold):
         return ChooseTargetResult(target=frozenset(active), matched_pairs=())
-    if threshold is None:
-        threshold = 0.0
 
     active_set_lookup = set(active)
     inactive = [

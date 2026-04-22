@@ -1,7 +1,6 @@
 from bandit_environment import StepFeedback
 from bijections import (
     optimistic_hire_rank_matching_bijection,
-    optimistic_hire_switching_threshold,
     random_bijection,
 )
 from choose_target import ChooseTargetFrontierSizeRecord, choose_target
@@ -25,6 +24,7 @@ class OptimisticHireConfig:
     log_frontier_sizes: bool = False
     switching_mode: str = "adaptive-count"
     pairing_rule: str = "rank-matching"
+    screening_enabled: bool = True
 
 
 class OptimisticHire(StatefulDelayedActionPolicy):
@@ -37,9 +37,11 @@ class OptimisticHire(StatefulDelayedActionPolicy):
     - feedback is a StepFeedback object with observed rewards and the realized active set.
 
     Iteration structure:
-    - At the start of each iteration, compute a target workforce U_ell (top-m by UCB, respecting cost constraint),
-      compute a block threshold N(ell), and identify i_min in U_ell with minimal count
-      at iteration start c_ell.
+    - At the start of each iteration, compute a target workforce U_ell. In the
+      main screened policy this uses the horizon-aware ChooseTarget rule; in the
+      no-screen ablation it is simply the top-m set by UCB. Then compute a
+      block threshold N(ell) and identify i_min in U_ell with minimal count at
+      iteration start c_ell.
     - Initiate one-for-one replacements to move toward U_ell.
     - Block phase: keep the workforce fixed until the realized active workforce
       matches the target and
@@ -63,6 +65,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         log_frontier_sizes: bool = False,
         switching_mode: str = "adaptive-count",
         pairing_rule: str = "rank-matching",
+        screening_enabled: bool = True,
     ):
         super().__init__(k=k, m=m, rng=rng)
         if gamma <= 0:
@@ -93,6 +96,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
             log_frontier_sizes=log_frontier_sizes,
             switching_mode=switching_mode_normalized,
             pairing_rule=pairing_rule_normalized,
+            screening_enabled=bool(screening_enabled),
         )
         self.prev_target: Set[int] = set()
         self.iterations: int = 0
@@ -255,42 +259,64 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         Compute the optimistic target workforce U_ell.
 
-        This solves the horizon-aware ChooseTarget subproblem from the paper:
-        maximize the sum of UCB scores over the target workforce while only
-        allowing the rank-matched replacements to recover the switching cost in
-        aggregate over the remaining horizon.
+        When horizon screening is enabled, this solves the horizon-aware
+        ChooseTarget subproblem from the paper. When screening is disabled for
+        the ablation study, the target is simply the set of m workers with the
+        largest UCB values.
         """
         if active is None:
             active = sorted(self.current_target)
 
-        frontier_size_log: List[ChooseTargetFrontierSizeRecord] | None = None
-        if self.cfg.log_frontier_sizes:
-            frontier_size_log = []
-
         start_time = time.perf_counter()
-        result = choose_target(
-            active_set=active,
-            counts=self.counts.tolist(),
-            empirical_means=self.empirical_means().tolist(),
-            current_period=current_period,
-            horizon=self.cfg.horizon,
-            switching_cost=switching_cost,
-            ucb_coef=self.cfg.ucb_coef,
-            time_index=self.t,
-            frontier_size_log=frontier_size_log,
-        )
+        if not self.cfg.screening_enabled:
+            ucb = self.ucb_values()
+            ranked_workers = sorted(
+                range(1, self.cfg.k + 1),
+                key=lambda worker_id: (float(ucb[worker_id - 1]), -worker_id),
+                reverse=True,
+            )
+            target = set(ranked_workers[: self.cfg.m])
+            self.last_frontier_size_log = []
+        else:
+            if current_period is None:
+                raise ValueError(
+                    "current_period must be provided when horizon screening is enabled."
+                )
+            horizon = self.cfg.horizon
+            if horizon is None:
+                raise ValueError(
+                    "A finite horizon is required when horizon screening is enabled."
+                )
+
+            frontier_size_log: List[ChooseTargetFrontierSizeRecord] | None = None
+            if self.cfg.log_frontier_sizes:
+                frontier_size_log = []
+
+            result = choose_target(
+                active_set=active,
+                counts=self.counts.tolist(),
+                empirical_means=self.empirical_means().tolist(),
+                current_period=current_period,
+                horizon=horizon,
+                switching_cost=switching_cost,
+                ucb_coef=self.cfg.ucb_coef,
+                time_index=self.t,
+                frontier_size_log=frontier_size_log,
+            )
+            target = set(result.target)
+
+            if frontier_size_log is not None:
+                annotated_records = [
+                    replace(record, decision_iteration=self.iterations)
+                    for record in frontier_size_log
+                ]
+                self.last_frontier_size_log = annotated_records
+                self.frontier_size_log.extend(annotated_records)
+
         self.last_selection_runtime = time.perf_counter() - start_time
         self.selection_runtime_log.append(self.last_selection_runtime)
 
-        if frontier_size_log is not None:
-            annotated_records = [
-                replace(record, decision_iteration=self.iterations)
-                for record in frontier_size_log
-            ]
-            self.last_frontier_size_log = annotated_records
-            self.frontier_size_log.extend(annotated_records)
-
-        return set(result.target)
+        return target
 
     def compute_block_length(self, target: Set[int]) -> int:
         """
@@ -368,13 +394,9 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         Construct the configured replacement bijection.
 
-        If a finite horizon is configured, return the full replacement set only
-        when
-
-            sum_{(i, j)} (UCB(j) - LCB(i)) >= |pi| * c / (T - t),
-
-        where T is the horizon, t is the current period, and c is the switching
-        cost. Otherwise return no replacements.
+        This method is intentionally responsible only for pairing outgoing and
+        incoming workers. Any screening logic belongs to target construction,
+        not to the pairing step.
 
         Parameters
         ----------
@@ -387,44 +409,18 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         -------
         List of (remove_id, add_id) replacement pairs.
         """
-        lcb = self.lcb_values()  # lcb[i] corresponds to worker (i+1)
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
         if self.cfg.pairing_rule == "rank-matching":
-            pairs = optimistic_hire_rank_matching_bijection(
+            return optimistic_hire_rank_matching_bijection(
                 current,
                 target,
                 ucb_values=ucb.tolist(),
             )
-        else:
-            pairs = random_bijection(
-                current,
-                target,
-                rng=self.rng,
-            )
-
-        threshold = optimistic_hire_switching_threshold(
-            current_period=current_period,
-            horizon=self.cfg.horizon,
-            switching_cost=switching_cost,
+        return random_bijection(
+            current,
+            target,
+            rng=self.rng,
         )
-        if threshold is None:
-            return pairs
-        if math.isinf(threshold):
-            return []
-
-        aggregate_slack = 0.0
-        for remove_id, add_id in pairs:
-            add_ucb = float(ucb[add_id - 1])
-            remove_lcb = float(lcb[remove_id - 1])
-            if math.isinf(add_ucb) and add_ucb > 0.0:
-                return pairs
-            if math.isinf(remove_lcb) and remove_lcb < 0.0:
-                return pairs
-            aggregate_slack += add_ucb - remove_lcb - threshold
-
-        if aggregate_slack >= -1e-12:
-            return pairs
-        return []
 
     def _compute_i_min_and_baseline(self, target: Set[int]) -> Tuple[int, int]:
         """

@@ -8,11 +8,15 @@ from simulation import ExperimentSeries, plot_regret_series, run_series_simulati
 k = 150
 m = 100
 T = 5 * 365 * 24
-c_values = [0, 24, 168]
+c_values = [
+    0, 
+    24, 
+    72
+    ]
 omega_max = 8
-delay_lower = 8
+delay_lower = omega_max
 n_runs = 20
-n_jobs = min(4, n_runs)
+n_jobs = 4
 base_seed = 12345
 show_plots = False
 
@@ -69,7 +73,7 @@ def main() -> None:
             series=series,
             simulate_kwargs=simulate_kwargs,
             title=f"Cumulative Regret Benchmark (c = {c})",
-            ylim=(0, 250000) if c == 168 else None,
+            ylim=(0, 300000) if c == 168 else None,
             save_path=str(output_path),
             show_plot=show_plots,
             precomputed=(means_out, results),

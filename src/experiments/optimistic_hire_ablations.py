@@ -9,11 +9,10 @@ from simulation import simulate
 
 k = 150
 m = 100
-T = 5 * 365 * 24
 c = 8
 omega_max = 8
 delay_lower = 8
-n_runs = 4
+n_runs = 20
 n_jobs = 1
 seed0 = 12345
 
@@ -79,35 +78,37 @@ def _run_summary(
     horizons: list[tuple[str, int]],
     simulate_kwargs: dict,
 ) -> dict[str, dict[str, dict[str, float]]]:
-    _, results = simulate(
-        policies=[policy_name for policy_name, _ in policies],
-        k=k,
-        m=m,
-        T=T,
-        means=means,
-        omega_max=omega_max,
-        delay_lower=delay_lower,
-        gamma="auto",
-        n_runs=n_runs,
-        n_jobs=n_jobs,
-        seed0=seed0,
-        **simulate_kwargs,
-    )
-
     oracle_reward = _oracle_reward()
-    summary: dict[str, dict[str, dict[str, float]]] = {}
-    for policy_name, label in policies:
-        mean_curve, std_curve = results[policy_name]
-        policy_summary: dict[str, dict[str, float]] = {}
-        for horizon_label, horizon_period in horizons:
+    summary: dict[str, dict[str, dict[str, float]]] = {
+        label: {} for _, label in policies
+    }
+
+    for horizon_label, horizon_period in horizons:
+        _, results = simulate(
+            policies=[policy_name for policy_name, _ in policies],
+            k=k,
+            m=m,
+            T=horizon_period,
+            means=means,
+            omega_max=omega_max,
+            delay_lower=delay_lower,
+            gamma="auto",
+            n_runs=n_runs,
+            n_jobs=n_jobs,
+            seed0=seed0,
+            **simulate_kwargs,
+        )
+
+        for policy_name, label in policies:
+            mean_curve, std_curve = results[policy_name]
             idx = horizon_period - 1
-            policy_summary[horizon_label] = {
+            summary[label][horizon_label] = {
                 "cumulative_regret_mean": float(mean_curve[idx]),
                 "cumulative_regret_std": float(std_curve[idx]),
                 "normalized_loss_mean": float(mean_curve[idx] / (horizon_period * oracle_reward)),
                 "normalized_loss_std": float(std_curve[idx] / (horizon_period * oracle_reward)),
             }
-        summary[label] = policy_summary
+
     return summary
 
 
@@ -127,7 +128,7 @@ def main() -> None:
     for spec in STRESS_TESTS:
         stress_summaries[spec["label"]] = _run_summary(
             policies=spec["policies"],
-            horizons=[("5 years", T)],
+            horizons=HORIZONS,
             simulate_kwargs=dict(spec["simulate_kwargs"]),
         )
 
@@ -166,7 +167,7 @@ def main() -> None:
     latex_lines.append(r"    \bottomrule")
     latex_lines.append(r"    \end{tabular*}")
     latex_lines.append(
-        r"    \caption{Ablations of \textsc{Optimistic-Hire} in the benchmark calibration of Section~\ref{numerical:benchmarks}. Each row averages four replications.}"
+        rf"    \caption{{Ablations of \textsc{{Optimistic-Hire}} in the benchmark calibration of Section~\ref{{numerical:benchmarks}}. Each row averages {n_runs} replications.}}"
     )
     latex_lines.append(r"    \label{tab:oh-ablations}")
     latex_lines.append(r"\end{table}")
@@ -235,7 +236,7 @@ def main() -> None:
     latex_lines.append(r"    \bottomrule")
     latex_lines.append(r"    \end{tabular*}")
     latex_lines.append(
-        r"    \caption{Stress-test ablations for \textsc{Optimistic-Hire}. The high-cost scenario uses \(c=168\) with i.i.d.\ uniform delays; the adversarial-delay scenario uses the same cost as the benchmark but assigns long delays to beneficial replacements and short delays to detrimental ones. Each row averages four replications.}"
+        rf"    \caption{{Stress-test ablations for \textsc{{Optimistic-Hire}}. The high-cost scenario uses \(c=168\) with i.i.d.\ uniform delays; the adversarial-delay scenario uses the same cost as the benchmark but assigns long delays to beneficial replacements and short delays to detrimental ones. Each row averages {n_runs} replications.}}"
     )
     latex_lines.append(r"    \label{tab:oh-ablations-stress}")
     latex_lines.append(r"\end{table}")

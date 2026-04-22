@@ -512,7 +512,7 @@ def _validate_optimistic_hire_auto_gamma_inputs(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
+    omega_max: float,
 ) -> None:
     if k <= 0:
         raise ValueError("k must be positive.")
@@ -532,7 +532,7 @@ def _optimistic_hire_bound_components(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
+    omega_max: float,
 ) -> Tuple[float, float, float, float]:
     """Return the constant, gamma, sqrt(gamma), and 1/sqrt(gamma) coefficients."""
     log_T = math.log(T)
@@ -578,7 +578,7 @@ def optimistic_hire_regret_bound(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
+    omega_max: float,
 ) -> float:
     """Upper bound used to select an automatic gamma for Optimistic-Hire."""
     _validate_optimistic_hire_auto_gamma_inputs(
@@ -616,7 +616,7 @@ def compute_optimistic_hire_auto_gamma(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
+    omega_max: float,
 ) -> float:
     """Numerically minimize the Optimistic-Hire gamma bound over gamma > 0."""
     _validate_optimistic_hire_auto_gamma_inputs(
@@ -793,9 +793,10 @@ def make_policy(
             k=k,
             m=m,
             gamma=resolved_gamma,
-            horizon=None,
+            horizon=T,
             rng=rng,
             log_frontier_sizes=log_frontier_sizes,
+            screening_enabled=False,
         )
 
     elif name == "optimistic-hire-random-pairing":

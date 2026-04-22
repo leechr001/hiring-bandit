@@ -12,3 +12,7 @@ artifacts/
 .DS_Store
 .idea/
 .vscode/
+
+paper_tex/**
+!paper_tex/**/
+!paper_tex/**/*.tex

@@ -815,7 +815,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     def _set_frame_params(self, f: int) -> None:
         p = self.k
         if f == 0:
-            self.block_len = self.m
+            self.block_len = 1
             self.blocks_in_frame = p
         else:
             self.block_len = f
