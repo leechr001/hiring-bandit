@@ -1,7 +1,6 @@
-from pathlib import Path
-
 import numpy as np
 
+from experiments.helpers import benchmark_output_dir
 from simulation import run_omega_sweep
 
 # Problem setup
@@ -18,24 +17,24 @@ y_up_lim = 90000
 rng = np.random.default_rng(12345)
 means = rng.uniform(0.3, 0.7, size=k).tolist()
 
-omega_max_values = [0, 8, 24, 7*24]
+delay_upper_values = [0, 8, 24, 7*24]
 policies = [
-    "AHT", 
-    "OMM", 
-    "Optimistic-Hire"
+    "a-aht",
+    "a-omm",
+    "delayed-replace-ucb",
     ]
 omega_sweeps = ["stochastic", "adversarial",]
 
 plot_file_names = [
-    "AHT_delay_sweep_stoch",
-    "OMM_delay_sweep_stoch",
-    "OH_delay_sweep_stoch",
-    "AHT_delay_sweep_wc",
-    "OMM_delay_sweep_wc",
-    "OH_delay_sweep_wc",
+    "A-AHT_delay_sweep_stoch",
+    "A-OMM_delay_sweep_stoch",
+    "DR-UCB_delay_sweep_stoch",
+    "A-AHT_delay_sweep_wc",
+    "A-OMM_delay_sweep_wc",
+    "DR-UCB_delay_sweep_wc",
 ]
 
-output_dir = Path(__file__).resolve().parents[2] / "artifacts" / "sweep_omega_max"
+output_dir = benchmark_output_dir(module_file=__file__, output_subdir="sweep_delay_upper")
 output_dir.mkdir(parents=True, exist_ok=True)
 
 for file_name, (omega_process, policy_name) in zip(
@@ -51,7 +50,7 @@ for file_name, (omega_process, policy_name) in zip(
             policy_name=policy_name,
             means=means,
             c=c,
-            omega_values=omega_max_values,
+            omega_values=delay_upper_values,
             omega_process=omega_process,
             n_runs=n_runs,
             n_jobs=n_jobs,

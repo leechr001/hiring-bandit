@@ -122,7 +122,7 @@ def rank_matching_add_order(
     )
 
 
-def optimistic_hire_switching_threshold(
+def delayed_replace_ucb_switching_threshold(
     *,
     horizon: Optional[int],
     current_period: Optional[int],
@@ -139,14 +139,14 @@ def optimistic_hire_switching_threshold(
     return float(switching_cost) / float(remaining_periods)
 
 
-def optimistic_hire_rank_matching_bijection(
+def delayed_replace_ucb_rank_matching_bijection(
     current: Sequence[int],
     target: Sequence[int],
     *,
     ucb_values: Sequence[float],
 ) -> List[Tuple[int, int]]:
     """
-    Construct the optimistic-hire rank-matching bijection pi^R.
+    Construct the delayed-replace-ucb rank-matching bijection pi^R.
 
     Removed workers are ordered by descending UCB and added workers are ordered by
     descending UCB.

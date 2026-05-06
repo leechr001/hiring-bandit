@@ -1,17 +1,41 @@
 import math
 import random
-from typing import Optional, Sequence, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 """
 Defines a number of samplers that will be helpful througout
 """
 
-def make_bernoulli_samplers(means: Sequence[float], rng: random.Random):
+
+RewardSampler = Callable[[], float]
+AcceptanceSampler = Callable[[], object]
+
+
+def _rng_random(rng: object) -> float:
+    random_fn = getattr(rng, "random", None)
+    if random_fn is None:
+        raise TypeError("rng must provide a random() method.")
+    return float(random_fn())
+
+
+def _rng_gauss(rng: object, location: float, stddev: float) -> float:
+    gauss_fn = getattr(rng, "gauss", None)
+    if gauss_fn is not None:
+        return float(gauss_fn(location, stddev))
+
+    normal_fn = getattr(rng, "normal", None)
+    if normal_fn is not None:
+        return float(normal_fn(location, stddev))
+
+    raise TypeError("rng must provide either gauss() or normal().")
+
+
+def make_bernoulli_samplers(means: Sequence[float], rng: object):
     """
     Used for generation of rewards
     """
     def sampler(p):
-        return lambda: 1.0 if rng.random() < p else 0.0
+        return lambda: 1.0 if _rng_random(rng) < p else 0.0
     return [sampler(p) for p in means]
 
 
@@ -61,7 +85,7 @@ def _calibrate_truncated_normal_location(
 
 def make_truncated_normal_samplers(
     means: Sequence[float],
-    rng: random.Random,
+    rng: object,
     *,
     stddev: float = 0.1,
     lower: float = 0.0,
@@ -92,7 +116,7 @@ def make_truncated_normal_samplers(
     def sampler(location: float):
         def draw() -> float:
             while True:
-                sample = rng.gauss(location, stddev)
+                sample = _rng_gauss(rng, location, stddev)
                 if lower <= sample <= upper:
                     return float(sample)
 
@@ -101,7 +125,7 @@ def make_truncated_normal_samplers(
     return [sampler(location) for location in locations]
 
 def make_uniform_delay_sampler(
-    omega_max: int,
+    delay_upper: int,
     rng=None,
     *,
     delay_lower: int = 0,
@@ -111,30 +135,75 @@ def make_uniform_delay_sampler(
     """
     if delay_lower < 0:
         raise ValueError("delay_lower must be >= 0.")
-    if delay_lower > omega_max:
-        raise ValueError("delay_lower must be <= omega_max.")
+    if delay_upper < 0:
+        raise ValueError("delay_upper must be >= 0.")
+    if delay_lower > delay_upper:
+        raise ValueError("delay_lower must be <= delay_upper.")
     rng = rng or random.Random()
 
     # iid so pair and t are not used.
     def sampler(pair: Tuple[int, int], t: int) -> int:
-        return rng.randint(delay_lower, omega_max)
+        return rng.randint(delay_lower, delay_upper)
+    return sampler
+
+
+def make_geometric_delay_sampler(
+    *,
+    p: float,
+    rng=None,
+    delay_lower: int = 0,
+    delay_upper: Optional[int] = None,
+):
+    """
+    Generates delay completion times from a geometric distribution.
+
+    The sampled value is the number of failures before the first success, so
+    support starts at 0. ``delay_lower`` shifts the support upward. If
+    ``delay_upper`` is provided, the distribution is truncated to
+    ``[delay_lower, delay_upper]`` by resampling.
+    """
+    if not (0.0 < p <= 1.0):
+        raise ValueError("p must satisfy 0 < p <= 1.")
+    if delay_lower < 0:
+        raise ValueError("delay_lower must be >= 0.")
+    if delay_upper is not None and delay_lower > delay_upper:
+        raise ValueError("delay_lower must be <= delay_upper.")
+    rng = rng or random.Random()
+
+    def draw_unbounded() -> int:
+        failures = 0
+        while rng.random() >= p:
+            failures += 1
+        return delay_lower + failures
+
+    def sampler(pair: Tuple[int, int], t: int) -> int:
+        del pair, t
+
+        if delay_upper is None:
+            return draw_unbounded()
+
+        while True:
+            delay = draw_unbounded()
+            if delay <= delay_upper:
+                return delay
+
     return sampler
 
 
 def _validate_calendar_delay_params(
     *,
-    omega_max: int,
+    delay_upper: int,
     frequency: int,
 ) -> None:
-    if omega_max < 0:
-        raise ValueError("omega_max must be >= 0.")
+    if delay_upper < 0:
+        raise ValueError("delay_upper must be >= 0.")
     if frequency < 1:
         raise ValueError("frequency must be >= 1.")
 
 
-def _calendar_feasible_delays(t: int, *, omega_max: int, frequency: int) -> Sequence[int]:
+def _calendar_feasible_delays(t: int, *, delay_upper: int, frequency: int) -> Sequence[int]:
     _validate_calendar_delay_params(
-        omega_max=omega_max,
+        delay_upper=delay_upper,
         frequency=frequency,
     )
     if t < 1:
@@ -144,30 +213,30 @@ def _calendar_feasible_delays(t: int, *, omega_max: int, frequency: int) -> Sequ
     # calendar and omega = 0 is permitted.
     first_delay = (-t) % frequency
 
-    return list(range(first_delay, omega_max + 1, frequency))
+    return list(range(first_delay, delay_upper + 1, frequency))
 
 
 def _require_calendar_feasible_delays(
     t: int,
     *,
-    omega_max: int,
+    delay_upper: int,
     frequency: int,
 ) -> Sequence[int]:
     feasible_delays = _calendar_feasible_delays(
         t,
-        omega_max=omega_max,
+        delay_upper=delay_upper,
         frequency=frequency,
     )
     if not feasible_delays:
         raise ValueError(
-            "No feasible calendar-aligned completion times exist within omega_max "
-            f"for t={t}, frequency={frequency}, omega_max={omega_max}."
+            "No feasible calendar-aligned completion times exist within delay_upper "
+            f"for t={t}, frequency={frequency}, delay_upper={delay_upper}."
         )
     return feasible_delays
 
 
 def make_calendar_delay_sampler(
-    omega_max: int,
+    delay_upper: int,
     *,
     frequency: int,
     distribution: str = "geom",
@@ -179,12 +248,12 @@ def make_calendar_delay_sampler(
 
     Example: if periods are hours and ``frequency=8``, then a replacement started
     at time ``t`` may only complete at times ``t + omega`` that are multiples of 8.
-    Feasible delays are therefore the nonnegative values in ``[0, omega_max]`` such
+    Feasible delays are therefore the nonnegative values in ``[0, delay_upper]`` such
     that ``(t + omega) % frequency == 0``.
 
     Parameters
     ----------
-    omega_max:
+    delay_upper:
         Maximum allowed delay.
     frequency:
         Calendar spacing between feasible completion times.
@@ -195,7 +264,7 @@ def make_calendar_delay_sampler(
         ordered feasible completion periods. Ignored for uniform sampling.
     """
     _validate_calendar_delay_params(
-        omega_max=omega_max,
+        delay_upper=delay_upper,
         frequency=frequency,
     )
     if not (0.0 < geom_p <= 1.0):
@@ -213,7 +282,7 @@ def make_calendar_delay_sampler(
 
         feasible_delays = _require_calendar_feasible_delays(
             t,
-            omega_max=omega_max,
+            delay_upper=delay_upper,
             frequency=frequency,
         )
 
@@ -233,7 +302,7 @@ def make_calendar_delay_sampler(
 
     return sampler
 
-def make_adversarial_delay(means: Sequence[float], omega_max:int):
+def make_adversarial_delay(means: Sequence[float], delay_upper: int):
     """
     Computes and returns worst case delay from true means.
     Not really a "sampler" but keeping name for consistency.
@@ -244,14 +313,14 @@ def make_adversarial_delay(means: Sequence[float], omega_max:int):
         # 1-indexed because matches paper and I like confusing code.
         if means[i-1] >= means[j-1]:
             return 0
-        return omega_max
+        return delay_upper
 
     return sampler
 
 
 def make_calendar_adversarial_delay(
     means: Sequence[float],
-    omega_max: int,
+    delay_upper: int,
     *,
     frequency: int,
 ):
@@ -259,7 +328,7 @@ def make_calendar_adversarial_delay(
     Adversarial delay process restricted to calendar-aligned completion times.
     """
     _validate_calendar_delay_params(
-        omega_max=omega_max,
+        delay_upper=delay_upper,
         frequency=frequency,
     )
 
@@ -267,7 +336,7 @@ def make_calendar_adversarial_delay(
         i, j = pair
         feasible_delays = _require_calendar_feasible_delays(
             t,
-            omega_max=omega_max,
+            delay_upper=delay_upper,
             frequency=frequency,
         )
 
@@ -276,3 +345,54 @@ def make_calendar_adversarial_delay(
         return int(feasible_delays[-1])
 
     return sampler
+
+
+def make_conditional_samplers(
+    accept: AcceptanceSampler | Sequence[AcceptanceSampler],
+    reward: RewardSampler | Sequence[RewardSampler],
+    *,
+    rejected_value: float = 0.0,
+) -> RewardSampler | list[RewardSampler]:
+    """
+    Return reward sampler(s) gated by acceptance sampler(s).
+
+    ``accept`` is sampled on each draw. When it returns a truthy value, the
+    returned sampler draws from ``reward``; otherwise it returns
+    ``rejected_value``. If sequences are provided, samplers are composed
+    pairwise and a list of conditional samplers is returned.
+    """
+    if callable(accept):
+        if not callable(reward):
+            raise TypeError("accept and reward must both be callables or both be sequences.")
+
+        accept_sampler = accept
+        reward_sampler = reward
+
+        def sampler() -> float:
+            if accept_sampler():
+                return float(reward_sampler())
+            return float(rejected_value)
+
+        return sampler
+
+    if callable(reward):
+        raise TypeError("accept and reward must both be callables or both be sequences.")
+
+    accept_samplers = list(accept)
+    reward_samplers = list(reward)
+    if len(accept_samplers) != len(reward_samplers):
+        raise ValueError("accept and reward sampler sequences must have the same length.")
+
+    conditional_samplers: list[RewardSampler] = []
+    for accept_sampler, reward_sampler in zip(accept_samplers, reward_samplers):
+        if not callable(accept_sampler) or not callable(reward_sampler):
+            raise TypeError("accept and reward sequences must contain only callables.")
+        conditional_samplers.append(
+            make_conditional_samplers(
+                accept_sampler,
+                reward_sampler,
+                rejected_value=rejected_value,
+            )
+        )
+
+    return conditional_samplers

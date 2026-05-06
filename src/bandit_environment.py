@@ -65,7 +65,7 @@ class TemporaryHiringBanditEnv:
         delay_sampler: DelaySampler,
         *,
         c: float = 0.0,
-        omega_max: int = 1,
+        omega_mean: float = 0.0,
         initial_workforce: Optional[Sequence[int]] = None,
         rng: Optional[random.Random] = None,
         true_means: Optional[Sequence[float]] = None,
@@ -74,15 +74,15 @@ class TemporaryHiringBanditEnv:
             raise ValueError("k must be >= 2.")
         if not (1 <= m < k):
             raise ValueError("m must satisfy 1 <= m < k.")
-        if omega_max < 0:
-            raise ValueError("omega_max must be >= 0.")
+        if omega_mean < 0:
+            raise ValueError("omega_mean must be >= 0.")
         if c < 0:
             raise ValueError("c must be nonnegative.")
 
         self.k = int(k)
         self.m = int(m)
         self.c = float(c)
-        self.omega_max = int(omega_max)
+        self.omega_mean = float(omega_mean)
         self.rng = rng or random.Random()
 
         # Reward samplers keyed by worker id in {1,...,k}
@@ -263,8 +263,8 @@ class TemporaryHiringBanditEnv:
         cost = self.c * len(accepted_replacements)
         for (i, j) in accepted_replacements:
             omega = int(self.delay_sampler((i, j), self.t))
-            if not (0 <= omega <= self.omega_max):
-                raise ValueError("delay_sampler returned omega outside [0, omega_max].")
+            if omega < 0:
+                raise ValueError("delay_sampler returned a negative omega.")
             accepted_delays.append(omega)
             self.pending.append(
                 PendingReplacement(

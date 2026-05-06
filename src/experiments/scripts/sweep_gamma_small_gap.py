@@ -3,7 +3,7 @@ import numpy as np
 from simulation import (
     ExperimentSeries, 
     plot_regret_series, 
-    compute_optimistic_hire_auto_gamma
+    compute_delayed_replace_ucb_auto_gamma
 )
 
 
@@ -11,7 +11,7 @@ k = 150
 m = 100
 T = 5 * 365 * 24
 c = 8
-omega_max = 8
+delay_upper = 8
 n_runs = 5
 n_jobs = 4
 
@@ -20,12 +20,12 @@ base_seed = 12345
 rng = np.random.default_rng(base_seed)
 means = rng.uniform(0.55, 0.6, size=k).tolist()
 
-gamma_auto = compute_optimistic_hire_auto_gamma(
+gamma_auto = compute_delayed_replace_ucb_auto_gamma(
     k=k,
     m=m,
     T=T,
     c=c,
-    omega_max=omega_max,
+    omega_mean=delay_upper,
 )
 
 factors = [0.25, 0.5, 1, 2, 4]
@@ -33,7 +33,7 @@ gammas = [gamma_auto * f for f in factors]
 
 series = [
     ExperimentSeries(
-        policy_name="optimistic-hire",
+        policy_name="delayed-replace-ucb",
         label=rf"$\gamma={f}\cdot \gamma^*$",
         sim_kwargs={"gamma": float(gamma_auto * f)},
         plot_kwargs={"linewidth": 2},
@@ -49,7 +49,7 @@ plot_regret_series(
         "T": T,
         "means": means,
         "c": c,
-        "omega_max": omega_max,
+        "delay_upper": delay_upper,
         "n_runs": n_runs,
         "n_jobs": n_jobs,
     },

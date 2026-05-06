@@ -1,24 +1,29 @@
 from __future__ import annotations
 
 import json
-import math
 import random
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
-from experiments.benchmark_common import benchmark_output_dir, make_benchmark_means
+from experiments.helpers import benchmark_output_dir
+from experiments.simulation_setups.config_main import (
+    OMEGA_MEAN,
+    adapted_aht_series,
+    adapted_omm_series,
+    benchmark_simulate_kwargs,
+    delayed_replace_ucb_series,
+)
 from simulation import (
     make_delay_sampler_factory,
     make_policy,
     make_reward_sampler_factory,
 )
 from bandit_environment import TemporaryHiringBanditEnv
-from optimistic_hire import OptimisticHire
+from delayed_replace_ucb import DelayedReplaceUCB
 
 
 @dataclass(frozen=True)
@@ -75,35 +80,64 @@ class AggregateDiagnostics:
     frontier_size_max: int
 
 
+AHT_LABEL = adapted_aht_series().label or "Adapted-AHT"
+OMM_LABEL = adapted_omm_series().label or "Adapted-OMM"
+DR_UCB_LABEL = delayed_replace_ucb_series(omega_mean=OMEGA_MEAN).label or "DR-UCB"
+
 SERIES: tuple[DiagnosticsSeries, ...] = (
-    DiagnosticsSeries(policy_name="aht", label="AHT", pairing="Random"),
-    DiagnosticsSeries(policy_name="aht-rm", label="AHT", pairing="Rank-matching"),
-    DiagnosticsSeries(policy_name="omm", label="OMM", pairing="Random"),
-    DiagnosticsSeries(policy_name="omm-rm", label="OMM", pairing="Rank-matching"),
-    DiagnosticsSeries(policy_name="optimistic-hire", label="Optimistic-Hire", pairing="Rank-matching"),
+    DiagnosticsSeries(policy_name="a-aht", label=AHT_LABEL, pairing="Random"),
+    DiagnosticsSeries(policy_name="a-aht-rm", label=AHT_LABEL, pairing="Rank-matching"),
+    DiagnosticsSeries(policy_name="a-omm", label=OMM_LABEL, pairing="Random"),
+    DiagnosticsSeries(policy_name="a-omm-rm", label=OMM_LABEL, pairing="Rank-matching"),
+    DiagnosticsSeries(policy_name="delayed-replace-ucb", label=DR_UCB_LABEL, pairing="Rank-matching"),
 )
 
-k = 150
-m = 100
-T = 5 * 365 * 24
-c = 8
-omega_max = 8
-delay_lower = 8
-n_runs = 20
-n_jobs = 1
-seed0 = 12345
-review_interval = 6 * 30 * 24
-work_trial_periods = 1
-work_trial_rotation_periods = 90 * 24
 
-means = make_benchmark_means(k=k)
-reward_sampler_factory = make_reward_sampler_factory("bernoulli", means=means)
-delay_sampler_factory = make_delay_sampler_factory(
-    "uniform",
+omega_mean = OMEGA_MEAN
+gamma = f"auto={float(omega_mean)}"
+simulate_kwargs = benchmark_simulate_kwargs(omega_mean=omega_mean)
+
+k = int(simulate_kwargs["k"])
+m = int(simulate_kwargs["m"])
+T = int(simulate_kwargs["T"])
+means = list(simulate_kwargs["means"])
+c = float(simulate_kwargs["c"])
+delay_process_name = str(simulate_kwargs.get("delay_process_name", "uniform"))
+delay_lower = int(simulate_kwargs.get("delay_lower", 0))
+omega_mean_value = simulate_kwargs.get("omega_mean")
+omega_mean = float(omega_mean_value) if omega_mean_value is not None else None
+delay_geom_p_value = simulate_kwargs.get("delay_geom_p")
+delay_geom_p = (
+    float(delay_geom_p_value)
+    if delay_geom_p_value is not None
+    else None
+)
+calendar_frequency = simulate_kwargs.get("calendar_frequency")
+calendar_distribution = str(simulate_kwargs.get("calendar_distribution", "geom"))
+calendar_geom_p = float(simulate_kwargs.get("calendar_geom_p", 0.5))
+
+n_runs = int(simulate_kwargs["n_runs"])
+n_jobs = int(simulate_kwargs["n_jobs"])
+seed0 = int(simulate_kwargs["seed0"])
+
+reward_sampler_factory = make_reward_sampler_factory(
+    str(simulate_kwargs.get("reward_process_name", "bernoulli")),
     means=means,
-    omega_max=omega_max,
-    delay_lower=delay_lower,
+    reward_stddev=float(simulate_kwargs.get("reward_stddev", 0.1)),
+    reward_lower=float(simulate_kwargs.get("reward_lower", 0.0)),
+    reward_upper=float(simulate_kwargs.get("reward_upper", 1.0)),
 )
+delay_sampler_factory = make_delay_sampler_factory(
+    delay_process_name,
+    means=means,
+    delay_lower=delay_lower,
+    delay_geom_p=delay_geom_p,
+    omega_mean=omega_mean,
+    calendar_frequency=calendar_frequency,
+    calendar_distribution=calendar_distribution,
+    calendar_geom_p=calendar_geom_p,
+)
+
 output_dir = benchmark_output_dir(
     module_file=__file__,
     output_subdir="benchmark_diagnostics",
@@ -128,6 +162,7 @@ def _worker(spec: DiagnosticsSeries, seed: int) -> EpisodeDiagnostics:
     rng_seed = int(seed)
 
     policy_rng = random.Random(rng_seed)
+    policy = None
     initial_workforce = policy_rng.sample(list(range(1, k + 1)), m)
 
     env = TemporaryHiringBanditEnv(
@@ -136,25 +171,22 @@ def _worker(spec: DiagnosticsSeries, seed: int) -> EpisodeDiagnostics:
         reward_samplers=episode_reward_samplers,
         delay_sampler=episode_delay_sampler,
         c=c,
-        omega_max=omega_max,
         true_means=means,
         initial_workforce=initial_workforce,
     )
 
-    policy = make_policy(
-        spec.policy_name,
-        k=k,
-        m=m,
-        T=T,
-        c=c,
-        omega_max=omega_max,
-        rng=policy_rng,
-        review_interval=review_interval,
-        work_trial_periods=work_trial_periods,
-        work_trial_rotation_periods=work_trial_rotation_periods,
-        gamma="auto",
-        log_frontier_sizes=spec.policy_name == "optimistic-hire",
-    )
+    if policy is None:
+        policy = make_policy(
+            spec.policy_name,
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            rng=policy_rng,
+            omega_mean=omega_mean,
+            gamma=gamma,
+            log_frontier_sizes=spec.policy_name == "delayed-replace-ucb",
+        )
 
     oracle_reward = env.optimal_expected_reward()
     if oracle_reward is None:
@@ -166,7 +198,7 @@ def _worker(spec: DiagnosticsSeries, seed: int) -> EpisodeDiagnostics:
     switch_periods = 0
     pending_periods = 0
     accepted_delays: list[float] = []
-    cumulative_regret = 0.0
+    cumulative_regret = float(getattr(policy, "initial_regret", 0.0))
 
     start_time = time.perf_counter()
     for _ in range(T):
@@ -197,7 +229,7 @@ def _worker(spec: DiagnosticsSeries, seed: int) -> EpisodeDiagnostics:
     selection_runtime_ms_mean = 0.0
     selection_runtime_ms_max = 0.0
     max_frontier_size = 0
-    if isinstance(policy, OptimisticHire):
+    if isinstance(policy, DelayedReplaceUCB):
         if policy.selection_runtime_log:
             selection_runtime_ms_mean = 1000.0 * _safe_mean(policy.selection_runtime_log)
             selection_runtime_ms_max = 1000.0 * max(policy.selection_runtime_log)
@@ -289,7 +321,7 @@ def _build_latex_table(aggregates: Sequence[AggregateDiagnostics]) -> str:
     )
     lines.append(r"    \toprule")
     lines.append(
-        r"    Policy & Pairing & 5-year regret & Rejected share & Accepted repl. & Switch periods & Pending-period share \\"
+        r"    Policy & Pairing & Final regret & Rejected share & Accepted repl. & Switch periods & Pending-period share \\"
     )
     lines.append(r"    \midrule")
     for row in aggregates:
@@ -322,7 +354,7 @@ def _build_latex_table(aggregates: Sequence[AggregateDiagnostics]) -> str:
 def _build_runtime_summary(aggregates: Sequence[AggregateDiagnostics]) -> dict[str, Any]:
     runtime_summary: dict[str, Any] = {}
     for row in aggregates:
-        if row.policy_name != "optimistic-hire":
+        if row.policy_name != "delayed-replace-ucb":
             continue
         runtime_summary = {
             "policy": row.label,
@@ -374,24 +406,27 @@ def main() -> None:
             "m": m,
             "T": T,
             "c": c,
-            "omega_max": omega_max,
+            "omega_mean": omega_mean,
+            "gamma": gamma,
+            "delay_process_name": delay_process_name,
+            "delay_geom_p": delay_geom_p,
             "delay_lower": delay_lower,
             "n_runs": n_runs,
             "n_jobs": n_jobs,
             "seed0": seed0,
         },
         "aggregates": [asdict(row) for row in ordered_aggregates],
-        "optimistic_hire_runtime": _build_runtime_summary(ordered_aggregates),
+        "delayed_replace_ucb_runtime": _build_runtime_summary(ordered_aggregates),
     }
 
     (output_dir / "benchmark_diagnostics.json").write_text(
         json.dumps(diagnostics_payload, indent=2)
     )
     (output_dir / "benchmark_adaptation_diagnostics.tex").write_text(
-        _build_latex_table(ordered_aggregates[:4])
+        _build_latex_table(ordered_aggregates)
     )
 
-    print(json.dumps(diagnostics_payload["optimistic_hire_runtime"], indent=2))
+    print(json.dumps(diagnostics_payload["delayed_replace_ucb_runtime"], indent=2))
 
 
 if __name__ == "__main__":

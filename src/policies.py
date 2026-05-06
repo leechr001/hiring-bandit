@@ -29,7 +29,7 @@ class DelayedActionPolicy(ABC):
         m: int,
         *,
         c: float = 0.0,
-        omega_max: int = 0,
+        omega_mean: float = 0.0,
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
     ) -> None:
@@ -43,7 +43,7 @@ class DelayedActionPolicy(ABC):
 
         # Optional parameters used by some delayed-action policies.
         self.c = float(c)
-        self.omega_max = int(omega_max)
+        self.omega_mean = float(omega_mean)
 
         # Set the type of bijection to be used
         self._bijection_fn = make_bijection(bijection_name)
@@ -214,9 +214,6 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
         raise NotImplementedError
 
     def after_feedback(self, feedback: StepFeedback) -> None:
-        if self.phase == "transition":
-            self.phase = "hold"
-
         if self.phase == "hold":
             self.on_hold_feedback(feedback)
 
@@ -233,7 +230,7 @@ class StatefulDelayedActionPolicy(EmpiricalDelayedActionPolicy):
 
         normalized_target = self._normalize_target(target)
         self.current_target = set(normalized_target)
-        self.phase = "transition"
+        self.phase = "hold"
         return self._propose_replacements_from_target(env, normalized_target)
 
 
@@ -322,14 +319,14 @@ class EpsilonGreedyHiringPolicy(EmpiricalDelayedActionPolicy):
         return [i + 1 for i in top_idx]
 
 
-class OMM(EmpiricalDelayedActionPolicy):
+class AdaptedOMM(EmpiricalDelayedActionPolicy):
     """
-    OMM (Optimistic Matroid Maximization) specialized to m-of-k semi-bandits.
+    A-OMM (Adapted-OMM) specialized to m-of-k semi-bandits.
 
     Following Algorithm 2 of Kveton et al. (2014), this baseline:
       - Computes U_i(t) = mean_i + sqrt(alpha * log(t) / n_i)
       - If n_i == 0, set UCB_i = +inf (forces initial exploration)
-      - Chooses the top-m workers greedily by those optimistic scores.
+      - Chooses the top-m workers greedily by those UCB scores.
 
     Parameters
     ----------
@@ -347,9 +344,10 @@ class OMM(EmpiricalDelayedActionPolicy):
         m: int,
         alpha: float = 2.0,
         bijection_name: str = 'random',
+        omega_mean: float = 0.0,
         rng: Optional[random.Random] = None,
     ) -> None:
-        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
+        super().__init__(k, m, bijection_name=bijection_name, omega_mean=omega_mean, rng=rng)
 
         if alpha <= 0:
             raise ValueError("alpha must be positive.")
@@ -388,6 +386,124 @@ class OMM(EmpiricalDelayedActionPolicy):
         return [i + 1 for i in top_idx]
 
 
+def _draw_correlated_prescreen_estimates(
+    *,
+    true_means: Sequence[float],
+    rho: float,
+    rng: random.Random,
+) -> np.ndarray:
+    if not (-1.0 <= rho <= 1.0):
+        raise ValueError("rho must be in [-1, 1].")
+
+    means = np.asarray(true_means, dtype=np.float64)
+    mean_mu = float(means.mean())
+    centered_means = means - mean_mu
+    mean_norm = float(np.linalg.norm(centered_means))
+
+    if mean_norm <= 1e-12:
+        if math.isclose(rho, 1.0):
+            return means.copy()
+        raise ValueError(
+            "pre-screen rho requires true means with nonzero across-arm variance."
+        )
+
+    if math.isclose(abs(rho), 1.0):
+        return mean_mu + float(rho) * centered_means
+
+    mean_norm_sq = float(np.dot(centered_means, centered_means))
+    for _ in range(100):
+        raw = np.asarray([rng.gauss(0.0, 1.0) for _ in range(len(means))], dtype=np.float64)
+        raw -= float(raw.mean())
+        raw -= (float(np.dot(raw, centered_means)) / mean_norm_sq) * centered_means
+        raw_norm = float(np.linalg.norm(raw))
+        if raw_norm > 1e-12:
+            noise_direction = raw / raw_norm
+            break
+    else:
+        noise_direction = None
+        for idx in range(len(means)):
+            raw = np.zeros(len(means), dtype=np.float64)
+            raw[idx] = 1.0
+            raw -= float(raw.mean())
+            raw -= (float(np.dot(raw, centered_means)) / mean_norm_sq) * centered_means
+            raw_norm = float(np.linalg.norm(raw))
+            if raw_norm > 1e-12:
+                noise_direction = raw / raw_norm
+                break
+
+        if noise_direction is None:
+            raise ValueError(
+                "Cannot construct pre-screen estimates with exact correlation rho "
+                "for this true-means vector."
+            )
+
+    noise_weight = math.sqrt(max(0.0, 1.0 - float(rho) * float(rho)))
+    centered_scores = (
+        float(rho) * centered_means
+        + noise_weight * mean_norm * noise_direction
+    )
+    return mean_mu + centered_scores
+
+
+class PreScreen(DelayedActionPolicy):
+    """
+    Fixed-target policy initialized from noisy period-0 estimates of the true means.
+
+    The estimates are scores ``S_i = mu_i + epsilon_i`` constructed so their
+    across-arm sample correlation with the true means is ``rho``. The policy
+    selects the top-m estimated workers once and never changes that target.
+    ``initial_regret`` records the up-front cost of obtaining the pre-screen
+    information for the simulator's regret accounting.
+    """
+
+    def __init__(
+        self,
+        k: int,
+        m: int,
+        *,
+        true_means: Sequence[float],
+        rho: float,
+        cost: float,
+        bijection_name: str = "random",
+        rng: Optional[random.Random] = None,
+    ) -> None:
+        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
+
+        if len(true_means) != k:
+            raise ValueError("true_means must contain exactly k values.")
+        if not (-1.0 <= rho <= 1.0):
+            raise ValueError("rho must be in [-1, 1].")
+        if cost < 0:
+            raise ValueError("cost must be non-negative.")
+
+        self.true_means = np.asarray(true_means, dtype=np.float64)
+        self.rho = float(rho)
+        self.initial_regret = float(cost)
+        self.estimates = np.zeros(self.k, dtype=np.float64)
+        self.fixed_target: List[int] = []
+        self.reset()
+
+    def reset(self) -> None:
+        self._clear_replacement_diagnostics()
+        self.estimates = _draw_correlated_prescreen_estimates(
+            true_means=self.true_means,
+            rho=self.rho,
+            rng=self.rng,
+        )
+
+        perm = list(range(self.k))
+        self.rng.shuffle(perm)
+        ranked = [(self.estimates[i], i) for i in perm]
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        self.fixed_target = [i + 1 for _, i in ranked[: self.m]]
+
+    def update(self, feedback: StepFeedback) -> None:
+        return None
+
+    def compute_target(self) -> List[int]:
+        return list(self.fixed_target)
+
+
 class Threshold(EmpiricalDelayedActionPolicy):
     """
     Threshold policy for delayed hiring.
@@ -406,9 +522,9 @@ class Threshold(EmpiricalDelayedActionPolicy):
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         c: float = 0.0,
-        omega_max: int = 0,
+        omega_mean: float = 0.0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_mean=omega_mean, rng=rng)
         self.threshold = float(threshold)
         self._active_snapshot: List[int] = []
         self.reset()
@@ -459,11 +575,11 @@ class Threshold(EmpiricalDelayedActionPolicy):
         return sorted(target)
 
 
-class SemiAnnualReview(StatefulDelayedActionPolicy):
+class FixedScheduleGreedy(StatefulDelayedActionPolicy):
     """
-    Periodic review policy that reselects the workforce on a fixed review cadence.
+    Fixed-schedule greedy policy that reselects the workforce on a fixed schedule.
 
-    The policy holds the current workforce between reviews. At each review time it
+    The policy holds the current workforce between scheduled decisions. At each scheduled decision time it
     selects the top-m workers by empirical mean, treating untried workers as having
     score +inf so they are explored when available.
     """
@@ -476,9 +592,9 @@ class SemiAnnualReview(StatefulDelayedActionPolicy):
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         c: float = 0.0,
-        omega_max: int = 0,
+        omega_mean: float = 0.0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_mean=omega_mean, rng=rng)
         if review_interval <= 0:
             raise ValueError("review_interval must be positive.")
         self.review_interval = int(review_interval)
@@ -517,103 +633,100 @@ class SemiAnnualReview(StatefulDelayedActionPolicy):
 
 class WorkTrial(StatefulDelayedActionPolicy):
     """
-    Work-trial policy with an initial short trial and two fixed review blocks.
+    Work-trial policy with an initial pre-screen and two fixed review blocks.
 
     Stage 1:
-      - Give every worker a short trial of ``trial_periods`` active periods.
+      - Pre-screen workers using scores with correlation ``rho`` to the true means.
+      - Select the top-2m workers by pre-screen score.
     Stage 2:
-      - Select the top-2m workers by empirical mean.
       - Hold the first m for ``rotation_periods`` periods.
       - Then hold the second m for ``rotation_periods`` periods.
     Stage 3:
-      - Permanently retain the empirically best m workers.
+      - Permanently retain the empirically best m workers from the pre-screen shortlist.
     """
 
     def __init__(
         self,
         k: int,
         m: int,
-        trial_periods: int = 1,
+        *,
+        true_means: Sequence[float],
+        rho: float = 1.0,
+        cost: float = 0.0,
         rotation_periods: int = 90 * 24,
         bijection_name: str = 'random',
         rng: Optional[random.Random] = None,
         c: float = 0.0,
-        omega_max: int = 0,
+        omega_mean: float = 0.0,
     ) -> None:
-        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_max=omega_max, rng=rng)
-        if trial_periods <= 0:
-            raise ValueError("trial_periods must be positive.")
+        super().__init__(k, m, c=c, bijection_name=bijection_name, omega_mean=omega_mean, rng=rng)
+        if len(true_means) != k:
+            raise ValueError("true_means must contain exactly k values.")
+        if not (-1.0 <= rho <= 1.0):
+            raise ValueError("rho must be in [-1, 1].")
+        if cost < 0:
+            raise ValueError("cost must be non-negative.")
         if rotation_periods <= 0:
             raise ValueError("rotation_periods must be positive.")
-        self.trial_periods = int(trial_periods)
+        self.true_means = np.asarray(true_means, dtype=np.float64)
+        self.rho = float(rho)
+        self.initial_regret = float(cost)
         self.rotation_periods = int(rotation_periods)
-        self.stage = "trial"
-        self.required_trial_workers: Set[int] = set()
-        self.trial_baselines: Dict[int, int] = {}
+        self.stage = "first_block"
+        self.prescreen_estimates = np.zeros(self.k, dtype=np.float64)
         self.shortlist: List[int] = []
         self.block_elapsed = 0
         self._active_snapshot: List[int] = []
         self.reset()
 
     def reset_control_state(self) -> None:
-        self.stage = "trial"
-        self.required_trial_workers = set()
-        self.trial_baselines = {}
-        self.shortlist = []
+        self.stage = "first_block"
+        self.prescreen_estimates = _draw_correlated_prescreen_estimates(
+            true_means=self.true_means,
+            rho=self.rho,
+            rng=self.rng,
+        )
+        self._set_shortlist()
         self.block_elapsed = 0
         self._active_snapshot = []
 
     def initialize_control(self, active_now: Sequence[int], env) -> None:
         self._active_snapshot = list(active_now)
         self.current_target = set(active_now)
-        self.required_trial_workers = set(active_now)
-        self.trial_baselines = {
-            worker_id: int(self.counts[worker_id - 1])
-            for worker_id in active_now
-        }
-        self.stage = "trial"
-        self.phase = "hold"
+        self.stage = "first_block"
+        if set(active_now) == set(self._first_block_target()):
+            self.phase = "hold"
+        else:
+            self.phase = "ready"
 
-    def _rank_workers(self, *, treat_untried_as_infinite: bool = False) -> List[int]:
+
+    def _rank_workers(
+        self,
+        *,
+        candidates: Optional[Sequence[int]] = None,
+        treat_untried_as_infinite: bool = False,
+    ) -> List[int]:
         means = self.empirical_means()
         scores = means.copy()
         if treat_untried_as_infinite:
             scores[self.counts == 0] = float("inf")
 
-        perm = list(range(self.k))
+        if candidates is None:
+            perm = list(range(self.k))
+        else:
+            perm = [int(worker_id) - 1 for worker_id in candidates]
         self.rng.shuffle(perm)
         ranked = [(scores[i], i) for i in perm]
         ranked.sort(key=lambda x: x[0], reverse=True)
         return [i + 1 for _, i in ranked]
 
-    def _next_trial_target(self, active_now: Sequence[int]) -> List[int]:
-        remaining_untried = [
-            worker_id
-            for worker_id in range(1, self.k + 1)
-            if self.counts[worker_id - 1] == 0 and worker_id not in active_now
-        ]
-
-        if len(remaining_untried) >= self.m:
-            target = remaining_untried[: self.m]
-        else:
-            fillers = [worker_id for worker_id in active_now if worker_id not in remaining_untried]
-            target = remaining_untried + fillers[: self.m - len(remaining_untried)]
-
-        self.required_trial_workers = {
-            worker_id
-            for worker_id in target
-            if self.counts[worker_id - 1] == 0
-        }
-        self.trial_baselines = {
-            worker_id: int(self.counts[worker_id - 1])
-            for worker_id in target
-        }
-        return sorted(target)
-
     def _set_shortlist(self) -> None:
-        ranked = self._rank_workers()
+        perm = list(range(self.k))
+        self.rng.shuffle(perm)
+        ranked_scores = [(self.prescreen_estimates[i], i) for i in perm]
+        ranked_scores.sort(key=lambda x: x[0], reverse=True)
         shortlist_size = min(self.k, 2 * self.m)
-        self.shortlist = ranked[:shortlist_size]
+        self.shortlist = [i + 1 for _, i in ranked_scores[:shortlist_size]]
 
     def _first_block_target(self) -> List[int]:
         return list(self.shortlist[: self.m])
@@ -629,11 +742,9 @@ class WorkTrial(StatefulDelayedActionPolicy):
         return second
 
     def _final_target(self) -> List[int]:
-        return self._rank_workers()[: self.m]
+        return self._rank_workers(candidates=self.shortlist)[: self.m]
 
     def compute_target(self) -> List[int]:
-        if self.stage == "trial":
-            return self._next_trial_target(self._active_snapshot)
         if self.stage == "first_block":
             self.block_elapsed = 0
             return self._first_block_target()
@@ -651,20 +762,6 @@ class WorkTrial(StatefulDelayedActionPolicy):
         return self.compute_target()
 
     def on_hold_feedback(self, feedback: StepFeedback) -> None:
-        if self.stage == "trial":
-            if all(
-                int(self.counts[worker_id - 1]) - self.trial_baselines.get(worker_id, 0) >= self.trial_periods
-                for worker_id in self.required_trial_workers
-            ):
-                remaining_untried = any(self.counts[i] == 0 for i in range(self.k))
-                if remaining_untried:
-                    self.phase = "ready"
-                else:
-                    self._set_shortlist()
-                    self.stage = "first_block"
-                    self.phase = "ready"
-            return
-
         if self.stage in {"first_block", "second_block"}:
             self.block_elapsed += 1
             if self.block_elapsed >= self.rotation_periods:
@@ -677,9 +774,9 @@ class WorkTrial(StatefulDelayedActionPolicy):
 
 
 @dataclass(frozen=True)
-class AHTConfig:
+class AdaptedAHTConfig:
     """
-    Configuration for the block-allocation algorithm of Agrawal, Hegde, and Teneketzis (1990).
+    Configuration for the block-allocation algorithm of Adapted-AHT.
     """
     k: int
     m: int
@@ -687,14 +784,14 @@ class AHTConfig:
     ucb_coef: float = 2.0
 
 
-class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
+class AdaptedAHTPolicy(StatefulDelayedActionPolicy):
     """
-    Block-allocation policy for multiple plays with switching costs (Agrawal, Hegde, Teneketzis, 1990).
+    Block-allocation policy for multiple plays with switching costs (Adapted-AHT).
 
     Notes on inheritance:
     - Inherits validation, empirical statistics, and the transition/hold lifecycle from
       StatefulDelayedActionPolicy.
-    - Supplies the AHT-specific schedule and block-length logic through hooks.
+    - Supplies the A-AHT-specific schedule and block-length logic through hooks.
     """
 
     def __init__(
@@ -703,21 +800,24 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         k: int,
         m: int,
         bijection_name: str = 'random',
+        omega_mean: float = 0.0,
         rng: Optional[random.Random] = None,
         delta: Optional[float] = None,
         ucb_coef: float = 2.0,
     ) -> None:
-        super().__init__(k, m, bijection_name=bijection_name, rng=rng)
+        super().__init__(k, m, bijection_name=bijection_name, omega_mean=omega_mean, rng=rng)
 
         if ucb_coef <= 0:
             raise ValueError("ucb_coef must be > 0.")
 
         if delta is None:
-            delta = 1.0 / (2.0 * m * k)
+            # delta = 1e-6
+            # delta = 1 / (k + 1e-6)
+            delta = 1.0 / (2.0 * k)
         if not (0.0 < delta < 1.0 / k):
             raise ValueError("delta must satisfy 0 < delta < 1/k.")
 
-        self.cfg = AHTConfig(
+        self.cfg = AdaptedAHTConfig(
             k=self.k,
             m=self.m,
             delta=float(delta),
@@ -746,7 +846,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
 
     def compute_target(self) -> List[int]:
         """
-        For AHT, the target is the set we are currently trying to realize/hold.
+        For A-AHT, the target is the set we are currently trying to realize/hold.
         This is mainly for introspection/testing; act() is the real control logic.
         """
         return sorted(self.current_target)
@@ -754,10 +854,19 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
     def initialize_control(self, active_now: Sequence[int], env) -> None:
         self.current_target = set(active_now)
         self._initialize_schedule()
-        self.phase = "ready"
+        self.phase = "warmup"
 
     def plan_next_target(self, active_now: Sequence[int], env) -> Optional[Sequence[int]]:
-        if self.phase == "ready":
+        if self.phase == "warmup":
+            init_block = np.floor(self.t / self.m)
+            if self.t + self.m > self.k:
+                # last block fill he remainder randomly
+                desired = [init_block * self.m + i for i in range(self.k - self.t)]
+                desired = desired + [np.random.randint(init_block * self.m) 
+                                     for _ in range(self.t+ self.m - self.k)]
+            desired = [init_block * self.m + i for i in range(self.m)]
+            return sorted(desired)
+        elif self.phase == "ready":
             desired = self._choose_set_at_comparison_instant()
             self.block_remaining = self.block_len
             return sorted(desired)
@@ -765,10 +874,13 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
         return None
 
     def on_hold_feedback(self, feedback: StepFeedback) -> None:
-        self.block_remaining -= 1
-        if self.block_remaining <= 0:
-            self._advance_block()
-            self.phase = "ready"
+        if self.t in [r * self.m for r in range(self.k)]:
+            self.phase = "warmup"
+        else: 
+            self.block_remaining -= 1
+            if self.block_remaining <= 0:
+                self._advance_block()
+                self.phase = "ready"
 
     # ----------------------------
     # Estimation primitives
@@ -831,7 +943,7 @@ class AgrawalHegdeTeneketzisPolicy(StatefulDelayedActionPolicy):
             self._set_frame_params(self.frame_f)
 
     # ----------------------------
-    # AHT comparison-instant rule
+    # A-AHT comparison-instant rule
     # ----------------------------
 
     def _choose_set_at_comparison_instant(self) -> Set[int]:

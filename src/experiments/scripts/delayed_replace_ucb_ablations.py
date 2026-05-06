@@ -3,60 +3,49 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from experiments.benchmark_common import benchmark_output_dir, make_benchmark_means
+from experiments.helpers import benchmark_output_dir, make_benchmark_means
 from simulation import simulate
+from experiments.simulation_setups.config_main import (
 
+    K,
+    M,
+    N_JOBS,
+    N_RUNS,
+    OMEGA_MEAN,
+    PERFORMANCE_MEANS,
+    SWITCHING_COST,
+    SIMULATE_KWARGS,
+    BASE_SEED
+)
 
-k = 150
-m = 100
-c = 8
-omega_max = 8
-delay_lower = 8
-n_runs = 20
-n_jobs = 1
-seed0 = 12345
-
-means = make_benchmark_means(k=k, seed=seed0)
 output_dir = benchmark_output_dir(
     module_file=__file__,
-    output_subdir="optimistic_hire_ablations",
+    output_subdir="delayed_replace_ucb_ablations",
 )
 
 POLICIES = [
-    ("optimistic-hire", "OH"),
-    ("optimistic-hire-fixed-calendar", "OH + fixed calendar switching"),
-    ("optimistic-hire-no-screen", "OH without horizon screening"),
-    ("optimistic-hire-random-pairing", "OH + random pairing"),
+    ("delayed-replace-ucb", "DR-UCB"),
+    ("delayed-replace-ucb-fixed-calendar", "DR-UCB + fixed calendar switching"),
+    ("delayed-replace-ucb-no-screen", "DR-UCB without horizon screening"),
+    ("delayed-replace-ucb-random-pairing", "DR-UCB + random pairing"),
 ]
 
 HORIZONS = [
-    ("12 months", 365 * 24),
-    ("5 years", 5 * 365 * 24),
+    ("3 months", 90),
+    ("12 months", 365),
 ]
 
 STRESS_TESTS = [
     {
         "label": "High switching cost (c=168)",
         "policies": [
-            ("optimistic-hire", "OH"),
-            ("optimistic-hire-no-screen", "OH without horizon screening"),
+            ("delayed-replace-ucb", "DR-UCB"),
+            ("delayed-replace-ucb-no-screen", "DR-UCB without horizon screening"),
         ],
         "simulate_kwargs": {
             "c": 168,
-            "delay_process_name": "uniform",
         },
-    },
-    {
-        "label": "Adversarial delays",
-        "policies": [
-            ("optimistic-hire", "OH"),
-            ("optimistic-hire-random-pairing", "OH + random pairing"),
-        ],
-        "simulate_kwargs": {
-            "c": c,
-            "delay_process_name": "adversarial",
-        },
-    },
+    }
 ]
 
 
@@ -69,7 +58,7 @@ def _fmt_pct(mean: float, std: float) -> str:
 
 
 def _oracle_reward() -> float:
-    return float(sum(sorted((float(mu) for mu in means), reverse=True)[:m]))
+    return float(sum(sorted((float(mu) for mu in PERFORMANCE_MEANS), reverse=True)[:M]))
 
 
 def _run_summary(
@@ -86,16 +75,16 @@ def _run_summary(
     for horizon_label, horizon_period in horizons:
         _, results = simulate(
             policies=[policy_name for policy_name, _ in policies],
-            k=k,
-            m=m,
+            k=K,
+            m=M,
             T=horizon_period,
-            means=means,
-            omega_max=omega_max,
-            delay_lower=delay_lower,
-            gamma="auto",
-            n_runs=n_runs,
-            n_jobs=n_jobs,
-            seed0=seed0,
+            means=PERFORMANCE_MEANS,
+            delay_process_name="geometric",
+            delay_geom_p=1/OMEGA_MEAN,
+            gamma=f"auto-{OMEGA_MEAN}",
+            n_runs=N_RUNS,
+            n_jobs=N_JOBS,
+            seed0=BASE_SEED,
             **simulate_kwargs,
         )
 
@@ -118,10 +107,7 @@ def main() -> None:
     benchmark_summary = _run_summary(
         policies=POLICIES,
         horizons=HORIZONS,
-        simulate_kwargs={
-            "c": c,
-            "delay_process_name": "uniform",
-        },
+        simulate_kwargs={},
     )
 
     stress_summaries: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
@@ -129,7 +115,7 @@ def main() -> None:
         stress_summaries[spec["label"]] = _run_summary(
             policies=spec["policies"],
             horizons=HORIZONS,
-            simulate_kwargs=dict(spec["simulate_kwargs"]),
+            simulate_kwargs=spec["simulate_kwargs"],
         )
 
     summary = {
@@ -144,7 +130,7 @@ def main() -> None:
     latex_lines.append(r"    \setlength{\tabcolsep}{4pt}")
     latex_lines.append(r"    \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}} l r r}")
     latex_lines.append(r"    \toprule")
-    latex_lines.append(r"    Variant & 12-month regret & 5-year regret \\")
+    latex_lines.append(r"    Variant & 3-month regret & 12-month regret \\")
     latex_lines.append(r"    \midrule")
     for _, label in POLICIES:
         latex_lines.append(
@@ -153,12 +139,12 @@ def main() -> None:
                 [
                     label,
                     _fmt_regret(
-                        benchmark_summary[label]["12 months"]["cumulative_regret_mean"],
-                        benchmark_summary[label]["12 months"]["cumulative_regret_std"],
+                        benchmark_summary[label]["3 months"]["cumulative_regret_mean"],
+                        benchmark_summary[label]["3 months"]["cumulative_regret_std"],
                     ),
                     _fmt_regret(
-                        benchmark_summary[label]["5 years"]["cumulative_regret_mean"],
-                        benchmark_summary[label]["5 years"]["cumulative_regret_std"],
+                        benchmark_summary[label]["12 months"]["cumulative_regret_mean"],
+                        benchmark_summary[label]["12 months"]["cumulative_regret_std"],
                     ),
                 ]
             )
@@ -167,9 +153,9 @@ def main() -> None:
     latex_lines.append(r"    \bottomrule")
     latex_lines.append(r"    \end{tabular*}")
     latex_lines.append(
-        rf"    \caption{{Ablations of \textsc{{Optimistic-Hire}} in the benchmark calibration of Section~\ref{{numerical:benchmarks}}. Each row averages {n_runs} replications.}}"
+        rf"    \caption{{Ablations of \textsc{{DR-UCB}} in the benchmark calibration of Section~\ref{{numerical:benchmarks}}. Each row averages {N_RUNS} replications.}}"
     )
-    latex_lines.append(r"    \label{tab:oh-ablations}")
+    latex_lines.append(r"    \label{tab:da-ucb-ablations}")
     latex_lines.append(r"\end{table}")
     latex_lines.append("")
 
@@ -179,7 +165,7 @@ def main() -> None:
     latex_lines.append(r"    \setlength{\tabcolsep}{4pt}")
     latex_lines.append(r"    \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}} l r r}")
     latex_lines.append(r"    \toprule")
-    latex_lines.append(r"    Variant & 12-month normalized loss & 5-year normalized loss \\")
+    latex_lines.append(r"    Variant & 3-month normalized loss & 12-month normalized loss \\")
     latex_lines.append(r"    \midrule")
     for _, label in POLICIES:
         latex_lines.append(
@@ -188,12 +174,12 @@ def main() -> None:
                 [
                     label,
                     _fmt_pct(
-                        benchmark_summary[label]["12 months"]["normalized_loss_mean"],
-                        benchmark_summary[label]["12 months"]["normalized_loss_std"],
+                        benchmark_summary[label]["3 months"]["normalized_loss_mean"],
+                        benchmark_summary[label]["3 months"]["normalized_loss_std"],
                     ),
                     _fmt_pct(
-                        benchmark_summary[label]["5 years"]["normalized_loss_mean"],
-                        benchmark_summary[label]["5 years"]["normalized_loss_std"],
+                        benchmark_summary[label]["12 months"]["normalized_loss_mean"],
+                        benchmark_summary[label]["12 months"]["normalized_loss_std"],
                     ),
                 ]
             )
@@ -202,9 +188,9 @@ def main() -> None:
     latex_lines.append(r"    \bottomrule")
     latex_lines.append(r"    \end{tabular*}")
     latex_lines.append(
-        r"    \caption{Normalized-loss version of Table~\ref{tab:oh-ablations}.}"
+        r"    \caption{Normalized-loss version of Table~\ref{tab:da-ucb-ablations}.}"
     )
-    latex_lines.append(r"    \label{tab:oh-ablations-loss}")
+    latex_lines.append(r"    \label{tab:da-ucb-ablations-loss}")
     latex_lines.append(r"\end{table}")
     latex_lines.append("")
 
@@ -214,7 +200,7 @@ def main() -> None:
     latex_lines.append(r"    \setlength{\tabcolsep}{4pt}")
     latex_lines.append(r"    \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}} l l r}")
     latex_lines.append(r"    \toprule")
-    latex_lines.append(r"    Scenario & Variant & 5-year regret \\")
+    latex_lines.append(r"    Scenario & Variant & 12-month regret \\")
     latex_lines.append(r"    \midrule")
     for spec in STRESS_TESTS:
         label = spec["label"]
@@ -226,8 +212,8 @@ def main() -> None:
                         label,
                         policy_label,
                         _fmt_regret(
-                            stress_summaries[label][policy_label]["5 years"]["cumulative_regret_mean"],
-                            stress_summaries[label][policy_label]["5 years"]["cumulative_regret_std"],
+                            stress_summaries[label][policy_label]["12 months"]["cumulative_regret_mean"],
+                            stress_summaries[label][policy_label]["12 months"]["cumulative_regret_std"],
                         ),
                     ]
                 )
@@ -236,16 +222,16 @@ def main() -> None:
     latex_lines.append(r"    \bottomrule")
     latex_lines.append(r"    \end{tabular*}")
     latex_lines.append(
-        rf"    \caption{{Stress-test ablations for \textsc{{Optimistic-Hire}}. The high-cost scenario uses \(c=168\) with i.i.d.\ uniform delays; the adversarial-delay scenario uses the same cost as the benchmark but assigns long delays to beneficial replacements and short delays to detrimental ones. Each row averages {n_runs} replications.}}"
+        rf"    \caption{{Stress-test ablations for \textsc{{DR-UCB}}. The high-cost scenario uses \(c=168\) with geometric delays; Each row averages {N_RUNS} replications.}}"
     )
-    latex_lines.append(r"    \label{tab:oh-ablations-stress}")
+    latex_lines.append(r"    \label{tab:da-ucb-ablations-stress}")
     latex_lines.append(r"\end{table}")
     latex_lines.append("")
 
-    (output_dir / "optimistic_hire_ablations.json").write_text(
+    (output_dir / "delayed_replace_ucb_ablations.json").write_text(
         json.dumps(summary, indent=2)
     )
-    (output_dir / "optimistic_hire_ablations.tex").write_text(
+    (output_dir / "delayed_replace_ucb_ablations.tex").write_text(
         "\n".join(latex_lines)
     )
 

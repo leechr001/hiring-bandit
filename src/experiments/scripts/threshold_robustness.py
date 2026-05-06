@@ -1,4 +1,4 @@
-from experiments.benchmark_common import benchmark_output_dir, make_benchmark_means
+from experiments.helpers import benchmark_output_dir, make_benchmark_means
 from simulation import ExperimentSeries, plot_regret_series, run_series_simulations
 
 
@@ -6,7 +6,7 @@ k = 150
 m = 50
 T = 5 * 365 * 24
 c = 8
-omega_max = 8
+delay_upper = 8
 delay_lower = 8
 n_runs = 20
 n_jobs = min(4, n_runs)
@@ -14,8 +14,8 @@ base_seed = 12345
 
 series = [
     ExperimentSeries(
-        policy_name="optimistic-hire",
-        label="Optimistic-Hire",
+        policy_name="delayed-replace-ucb",
+        label="DR-UCB",
         sim_kwargs={"gamma": "auto"},
     ),
     ExperimentSeries(
@@ -73,7 +73,7 @@ def main() -> None:
             "T": T,
             "means": means,
             "c": c,
-            "omega_max": omega_max,
+            "delay_upper": delay_upper,
             "delay_lower": delay_lower,
             "n_runs": n_runs,
             "n_jobs": n_jobs,

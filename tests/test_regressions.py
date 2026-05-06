@@ -1,4 +1,5 @@
 import os
+import json
 import random
 import sys
 import tempfile
@@ -20,22 +21,27 @@ mpl_dir.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 
 from bijections import (
-    optimistic_hire_rank_matching_bijection,
-    optimistic_hire_switching_threshold,
+    delayed_replace_ucb_rank_matching_bijection,
+    delayed_replace_ucb_switching_threshold,
 )
 from bandit_environment import PendingReplacement, StepFeedback, TemporaryHiringBanditEnv
 from choose_target import choose_target
-from optimistic_hire import OptimisticHire
+from delayed_replace_ucb import DelayedReplaceUCB
+from experiments.helpers import _json_safe_metadata
 from policies import (
-    AgrawalHegdeTeneketzisPolicy,
-    SemiAnnualReview,
+    AdaptedAHTPolicy,
+    FixedScheduleGreedy,
+    PreScreen,
     StatefulDelayedActionPolicy,
     Threshold,
     WorkTrial,
 )
 from samplers import (
+    make_bernoulli_samplers,
     make_calendar_adversarial_delay,
     make_calendar_delay_sampler,
+    make_conditional_samplers,
+    make_geometric_delay_sampler,
     make_truncated_normal_samplers,
     make_uniform_delay_sampler,
 )
@@ -45,9 +51,9 @@ from simulation import (
     ExperimentSeries,
     make_delay_sampler_factory,
     make_reward_sampler_factory,
-    compute_optimistic_hire_auto_gamma,
+    compute_delayed_replace_ucb_auto_gamma,
     make_policy,
-    optimistic_hire_regret_bound,
+    delayed_replace_ucb_regret_bound,
     simulate,
 )
 
@@ -123,7 +129,7 @@ class RegressionTests(unittest.TestCase):
         active = tuple(sorted(active_set))
         ucb_values = [float(x) for x in empirical_means]
         lcb_values = [float(x) for x in empirical_means]
-        threshold = optimistic_hire_switching_threshold(
+        threshold = delayed_replace_ucb_switching_threshold(
             horizon=horizon,
             current_period=current_period,
             switching_cost=switching_cost,
@@ -139,7 +145,7 @@ class RegressionTests(unittest.TestCase):
         best_objective = sum(ucb_values[worker_id - 1] for worker_id in active)
 
         for target in combinations(range(1, len(empirical_means) + 1), len(active)):
-            pairs = optimistic_hire_rank_matching_bijection(
+            pairs = delayed_replace_ucb_rank_matching_bijection(
                 active,
                 target,
                 ucb_values=ucb_values,
@@ -170,7 +176,7 @@ class RegressionTests(unittest.TestCase):
     ):
         active = set(active_set)
         k = len(empirical_means)
-        threshold = optimistic_hire_switching_threshold(
+        threshold = delayed_replace_ucb_switching_threshold(
             horizon=horizon,
             current_period=current_period,
             switching_cost=switching_cost,
@@ -191,7 +197,7 @@ class RegressionTests(unittest.TestCase):
                         continue
 
                     candidate_target = sorted((active - {remove_id}) | {add_id})
-                    pairs = optimistic_hire_rank_matching_bijection(
+                    pairs = delayed_replace_ucb_rank_matching_bijection(
                         sorted(active),
                         candidate_target,
                         ucb_values=empirical_means,
@@ -220,23 +226,23 @@ class RegressionTests(unittest.TestCase):
             "m": 2,
             "T": 12,
             "means": [0.9, 0.8, 0.5, 0.3, 0.1],
-            "omega_max": 2,
+            "delay_upper": 2,
             "c": 1.0,
             "n_runs": 3,
             "seed0": 7,
         }
 
         _, results_ab = simulate(
-            policies=["omm", "epsilon-greedy"],
+            policies=["a-omm", "epsilon-greedy"],
             **kwargs,
         )
         _, results_ba = simulate(
-            policies=["epsilon-greedy", "omm"],
+            policies=["epsilon-greedy", "a-omm"],
             **kwargs,
         )
 
-        np.testing.assert_allclose(results_ab["omm"][0], results_ba["omm"][0])
-        np.testing.assert_allclose(results_ab["omm"][1], results_ba["omm"][1])
+        np.testing.assert_allclose(results_ab["a-omm"][0], results_ba["a-omm"][0])
+        np.testing.assert_allclose(results_ab["a-omm"][1], results_ba["a-omm"][1])
         np.testing.assert_allclose(
             results_ab["epsilon-greedy"][0],
             results_ba["epsilon-greedy"][0],
@@ -248,12 +254,12 @@ class RegressionTests(unittest.TestCase):
 
     def test_simulate_parallel_matches_sequential_for_builtin_processes(self) -> None:
         kwargs = {
-            "policies": ["omm", "optimistic-hire"],
+            "policies": ["a-omm", "delayed-replace-ucb"],
             "k": 5,
             "m": 2,
             "T": 20,
             "means": [0.9, 0.8, 0.5, 0.3, 0.1],
-            "omega_max": 2,
+            "delay_upper": 2,
             "c": 1.0,
             "n_runs": 2,
             "seed0": 11,
@@ -266,8 +272,8 @@ class RegressionTests(unittest.TestCase):
             np.testing.assert_allclose(sequential[policy_name][0], parallel[policy_name][0])
             np.testing.assert_allclose(sequential[policy_name][1], parallel[policy_name][1])
 
-    def test_aht_counts_first_target_active_period_toward_block(self) -> None:
-        policy = AgrawalHegdeTeneketzisPolicy(
+    def test_adapted_aht_counts_first_target_active_period_toward_block(self) -> None:
+        policy = AdaptedAHTPolicy(
             k=3,
             m=1,
             rng=random.Random(0),
@@ -344,7 +350,7 @@ class RegressionTests(unittest.TestCase):
             reward_samplers=[lambda: 0.0 for _ in range(4)],
             delay_sampler=lambda pair, t: 2,
             c=1.0,
-            omega_max=2,
+            omega_mean=2.0,
             initial_workforce=[1, 2],
             rng=random.Random(0),
         )
@@ -359,50 +365,8 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertEqual(env.pending_workers, {1, 2, 3, 4})
 
-    def test_aht_starts_schedule_immediately(self) -> None:
-        policy = AgrawalHegdeTeneketzisPolicy(
-            k=5,
-            m=2,
-            rng=random.Random(0),
-        )
-        env = self._PolicyEnv({1, 2})
-
-        policy.act(env)
-        env.active_set = set(policy.current_target)
-        policy.update(
-            StepFeedback(
-                individual_rewards={worker_id: 1.0 for worker_id in env.active_set},
-                active_set=frozenset(env.active_set),
-                completed_this_period=(),
-                pending_count=0,
-            )
-        )
-
-        self.assertEqual(policy.phase, "hold")
-        self.assertEqual(policy.frame_f, 0)
-        self.assertEqual(policy.block_i, 0)
-        self.assertEqual(policy.block_len, policy.m)
-        self.assertEqual(policy.blocks_in_frame, policy.k)
-        self.assertEqual(policy.block_remaining, policy.m - 1)
-
-    def test_aht_initializes_schedule_before_first_decision(self) -> None:
-        policy = AgrawalHegdeTeneketzisPolicy(
-            k=5,
-            m=2,
-            rng=random.Random(0),
-        )
-        env = self._PolicyEnv({1, 2})
-
-        policy.act(env)
-        self.assertEqual(policy.phase, "transition")
-        self.assertEqual(policy.frame_f, 0)
-        self.assertEqual(policy.block_i, 0)
-        self.assertEqual(policy.block_len, policy.m)
-        self.assertEqual(policy.blocks_in_frame, policy.k)
-        self.assertEqual(policy.block_remaining, policy.m)
-
-    def test_optimistic_hire_counts_first_target_active_period_toward_buffer(self) -> None:
-        policy = OptimisticHire(
+    def test_delayed_replace_ucb_counts_first_target_active_period_toward_buffer(self) -> None:
+        policy = DelayedReplaceUCB(
             k=3,
             m=1,
             gamma=1.0,
@@ -426,8 +390,8 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(policy.phase, "ready")
 
-    def test_optimistic_hire_waits_for_target_realization_before_becoming_ready(self) -> None:
-        policy = OptimisticHire(
+    def test_delayed_replace_ucb_waits_for_target_realization_before_becoming_ready(self) -> None:
+        policy = DelayedReplaceUCB(
             k=3,
             m=1,
             gamma=1.0,
@@ -450,27 +414,6 @@ class RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(policy.phase, "hold")
-
-    def test_optimistic_hire_bijection_returns_no_switches_at_horizon(self) -> None:
-        policy = OptimisticHire(
-            k=2,
-            m=1,
-            gamma=1.0,
-            horizon=5,
-            rng=random.Random(0),
-        )
-        policy.counts[:] = 1
-        policy.sums[:] = 0.5
-        policy.t = 5
-
-        pairs = policy.construct_bijection(
-            current=[1],
-            target=[2],
-            current_period=5,
-            switching_cost=1.0,
-        )
-
-        self.assertEqual(pairs, [])
 
     def test_choose_target_uses_horizon_aware_aggregate_dp(self) -> None:
         result = choose_target(
@@ -517,8 +460,8 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertTrue(all(record.time_index == 8 for record in frontier_size_log))
 
-    def test_optimistic_hire_compute_target_respects_switching_constraint(self) -> None:
-        policy = OptimisticHire(
+    def test_delayed_replace_ucb_compute_target_respects_switching_constraint(self) -> None:
+        policy = DelayedReplaceUCB(
             k=4,
             m=2,
             gamma=1.0,
@@ -539,16 +482,16 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(target, {1, 3})
 
-    def test_simulate_can_collect_optimistic_hire_frontier_logs(self) -> None:
+    def test_simulate_can_collect_delayed_replace_ucb_frontier_logs(self) -> None:
         frontier_size_log = []
 
         simulate(
-            policies=["optimistic-hire"],
+            policies=["delayed-replace-ucb"],
             k=4,
             m=2,
             T=5,
             means=[0.9, 0.7, 0.4, 0.2],
-            omega_max=1,
+            delay_upper=1,
             c=0.5,
             n_runs=1,
             seed0=7,
@@ -558,15 +501,15 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(frontier_size_log)
         self.assertTrue(
-            all(record.policy_name == "optimistic-hire" for record in frontier_size_log)
+            all(record.policy_name == "delayed-replace-ucb" for record in frontier_size_log)
         )
         self.assertTrue(all(record.episode_seed == 7 for record in frontier_size_log))
         self.assertTrue(
             all(record.decision_iteration is not None for record in frontier_size_log)
         )
 
-    def test_optimistic_hire_uses_aggregate_switching_rule(self) -> None:
-        policy = OptimisticHire(
+    def test_delayed_replace_ucb_uses_aggregate_switching_rule(self) -> None:
+        policy = DelayedReplaceUCB(
             k=5,
             m=3,
             gamma=1.0,
@@ -717,57 +660,73 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(result.matched_pairs, expected_pairs)
         self.assertAlmostEqual(result_objective, expected_objective)
 
-    def test_make_policy_resolves_auto_gamma_for_optimistic_hire(self) -> None:
+    def test_make_policy_resolves_auto_gamma_for_delayed_replace_ucb(self) -> None:
         kwargs = {
             "k": 10,
             "m": 3,
             "T": 2000,
             "c": 5.0,
-            "omega_max": 4,
+            "omega_mean": 4,
         }
-        expected_gamma = compute_optimistic_hire_auto_gamma(**kwargs)
+        expected_gamma = compute_delayed_replace_ucb_auto_gamma(**kwargs)
 
         policy = make_policy(
-            "optimistic-hire",
+            "delayed-replace-ucb",
             rng=random.Random(0),
             gamma="auto",
             **kwargs,
         )
-        self.assertIsInstance(policy, OptimisticHire)
-        assert isinstance(policy, OptimisticHire)
+        self.assertIsInstance(policy, DelayedReplaceUCB)
+        assert isinstance(policy, DelayedReplaceUCB)
 
         self.assertGreater(policy.cfg.gamma, 0.0)
         self.assertAlmostEqual(policy.cfg.gamma, expected_gamma)
 
-        base_bound = optimistic_hire_regret_bound(policy.cfg.gamma, **kwargs)
-        lower_bound = optimistic_hire_regret_bound(policy.cfg.gamma * 0.8, **kwargs)
-        upper_bound = optimistic_hire_regret_bound(policy.cfg.gamma * 1.2, **kwargs)
+        base_bound = delayed_replace_ucb_regret_bound(policy.cfg.gamma, **kwargs)
+        lower_bound = delayed_replace_ucb_regret_bound(policy.cfg.gamma * 0.8, **kwargs)
+        upper_bound = delayed_replace_ucb_regret_bound(policy.cfg.gamma * 1.2, **kwargs)
 
         self.assertLessEqual(base_bound, lower_bound)
         self.assertLessEqual(base_bound, upper_bound)
 
-    def test_calendar_delay_sampler_only_returns_calendar_aligned_delays(self) -> None:
-        sampler = make_calendar_delay_sampler(
-            20,
-            frequency=8,
-            distribution="unif",
+    def test_make_policy_parses_auto_gamma_omega_override(self) -> None:
+        kwargs = {
+            "k": 10,
+            "m": 3,
+            "T": 2000,
+            "c": 5.0,
+            "omega_mean": 4,
+        }
+
+        policy_zero = make_policy(
+            "delayed-replace-ucb",
             rng=random.Random(0),
+            gamma="auto0",
+            **kwargs,
         )
-
-        observed = {sampler((1, 2), 5) for _ in range(200)}
-        self.assertEqual(observed, {3, 11, 19})
-
-        factory = make_delay_sampler_factory(
-            "calendar",
-            means=[0.8, 0.2],
-            omega_max=20,
-            calendar_frequency=8,
-            calendar_distribution="unif",
+        expected_zero_gamma = compute_delayed_replace_ucb_auto_gamma(
+            **{**kwargs, "omega_mean": 0.0}
         )
-        factory_sampler = factory(7)
-        for _ in range(50):
-            delay = factory_sampler((1, 2), 8)
-            self.assertIn(delay, {8, 16})
+        self.assertAlmostEqual(policy_zero.cfg.gamma, expected_zero_gamma)
+
+        policy_custom = make_policy(
+            "delayed-replace-ucb",
+            rng=random.Random(0),
+            gamma="auto-2.5",
+            **kwargs,
+        )
+        expected_custom_gamma = compute_delayed_replace_ucb_auto_gamma(
+            **{**kwargs, "omega_mean": 2.5}
+        )
+        self.assertAlmostEqual(policy_custom.cfg.gamma, expected_custom_gamma)
+
+        with self.assertRaises(ValueError):
+            make_policy(
+                "delayed-replace-ucb",
+                rng=random.Random(0),
+                gamma="auto-n",
+                **kwargs,
+            )
 
     def test_uniform_delay_sampler_can_use_positive_lower_bound(self) -> None:
         sampler = make_uniform_delay_sampler(
@@ -779,6 +738,97 @@ class RegressionTests(unittest.TestCase):
 
         self.assertGreaterEqual(min(draws), 3)
         self.assertLessEqual(max(draws), 6)
+
+    def test_geometric_delay_sampler_respects_bounds_and_p(self) -> None:
+        sampler = make_geometric_delay_sampler(
+            p=0.4,
+            rng=random.Random(0),
+            delay_lower=2,
+            delay_upper=6,
+        )
+        draws = [sampler((1, 2), 1) for _ in range(1000)]
+
+        self.assertGreaterEqual(min(draws), 2)
+        self.assertLessEqual(max(draws), 6)
+        self.assertGreater(Counter(draws)[2], Counter(draws)[5])
+
+    def test_geometric_delay_factory_builds_sampler(self) -> None:
+        factory = make_delay_sampler_factory(
+            "geometric",
+            means=[0.8, 0.2],
+            delay_upper=5,
+            delay_lower=1,
+            delay_geom_p=1.0,
+        )
+
+        sampler = factory(7)
+        self.assertEqual(sampler((1, 2), 3), 1)
+
+    def test_geometric_delay_factory_can_be_unbounded_from_omega_mean(self) -> None:
+        factory = make_delay_sampler_factory(
+            "geometric",
+            means=[0.8, 0.2],
+            omega_mean=100.0,
+        )
+
+        sampler = factory(0)
+        draws = [sampler((1, 2), 3) for _ in range(200)]
+        self.assertGreater(max(draws), 3)
+
+    def test_environment_allows_unbounded_delay_without_delay_upper(self) -> None:
+        env = TemporaryHiringBanditEnv(
+            k=2,
+            m=1,
+            reward_samplers=[lambda: 0.0, lambda: 0.0],
+            delay_sampler=lambda pair, t: 10,
+            initial_workforce=[1],
+            omega_mean=10.0,
+        )
+
+        _, _, _, feedback = env.step([(1, 2)])
+        self.assertEqual(feedback.accepted_delays, (10,))
+        self.assertEqual(feedback.pending_count, 1)
+
+    def test_make_policy_auto_gamma_uses_omega_mean(self) -> None:
+        kwargs = {
+            "k": 10,
+            "m": 3,
+            "T": 2000,
+            "c": 5.0,
+            "omega_mean": 2.5,
+        }
+        policy = make_policy(
+            "delayed-replace-ucb",
+            rng=random.Random(0),
+            gamma="auto",
+            **kwargs,
+        )
+        expected_gamma = compute_delayed_replace_ucb_auto_gamma(
+            k=kwargs["k"],
+            m=kwargs["m"],
+            T=kwargs["T"],
+            c=kwargs["c"],
+            omega_mean=kwargs["omega_mean"],
+        )
+
+        self.assertAlmostEqual(policy.cfg.gamma, expected_gamma)
+
+    def test_simulate_geometric_delay_can_use_omega_mean_without_delay_upper(self) -> None:
+        _, results = simulate(
+            policies=["delayed-replace-ucb"],
+            k=3,
+            m=1,
+            T=3,
+            means=[0.9, 0.4, 0.2],
+            c=0.0,
+            delay_process_name="geometric",
+            omega_mean=2.0,
+            gamma="auto",
+            n_runs=1,
+            seed0=0,
+        )
+
+        self.assertEqual(results["delayed-replace-ucb"][0].shape, (3,))
 
     def test_calendar_delay_sampler_geom_prefers_earlier_feasible_periods(self) -> None:
         sampler = make_calendar_delay_sampler(
@@ -797,7 +847,7 @@ class RegressionTests(unittest.TestCase):
     def test_calendar_adversarial_delay_uses_calendar_extremes(self) -> None:
         sampler = make_calendar_adversarial_delay(
             means=[0.8, 0.2, 0.95],
-            omega_max=20,
+            delay_upper=20,
             frequency=8,
         )
 
@@ -809,7 +859,7 @@ class RegressionTests(unittest.TestCase):
         factory = make_delay_sampler_factory(
             "calendar-adversarial",
             means=[0.8, 0.2, 0.95],
-            omega_max=20,
+            delay_upper=20,
             calendar_frequency=8,
         )
 
@@ -822,14 +872,14 @@ class RegressionTests(unittest.TestCase):
             [0.9, 0.8, 0.1],
             2,
             {
-                "OMM": (
+                "A-OMM": (
                     np.asarray([2.0, 6.0, 12.0], dtype=np.float64),
                     np.asarray([1.0, 3.0, 6.0], dtype=np.float64),
                 )
             }
         )
 
-        mean_curve, std_curve = averaged["OMM"]
+        mean_curve, std_curve = averaged["A-OMM"]
         np.testing.assert_allclose(
             mean_curve,
             np.asarray([2.0, 3.0, 4.0]) / 1.7,
@@ -855,7 +905,7 @@ class RegressionTests(unittest.TestCase):
             m=2,
             T=10,
             c=0.0,
-            omega_max=1,
+            omega_mean=1.0,
             rng=random.Random(0),
             threshold=0.5,
         )
@@ -874,28 +924,82 @@ class RegressionTests(unittest.TestCase):
                 m=2,
                 T=10,
                 c=0.0,
-                omega_max=1,
+                omega_mean=1.0,
                 rng=random.Random(0),
             )
 
-    def test_make_policy_builds_semiannual_review_with_custom_interval(self) -> None:
+    def test_make_policy_builds_fixed_schedule_greedy_with_custom_interval(self) -> None:
         policy = make_policy(
-            "SemiAnnualReview",
+            "FixedScheduleGreedy",
             k=4,
             m=2,
             T=10,
             c=0.0,
-            omega_max=1,
+            omega_mean=1.0,
             rng=random.Random(0),
             review_interval=12,
         )
 
-        self.assertIsInstance(policy, SemiAnnualReview)
-        assert isinstance(policy, SemiAnnualReview)
+        self.assertIsInstance(policy, FixedScheduleGreedy)
+        assert isinstance(policy, FixedScheduleGreedy)
         self.assertEqual(policy.review_interval, 12)
 
-    def test_semiannual_review_reselects_team_on_review_schedule(self) -> None:
-        policy = SemiAnnualReview(k=3, m=1, review_interval=2, rng=random.Random(0))
+    def test_make_policy_builds_pre_screen_with_correlated_estimates(self) -> None:
+        true_means = [0.1, 0.8, 0.4, 0.7]
+        policy = make_policy(
+            "pre-screen",
+            k=4,
+            m=2,
+            T=10,
+            c=0.0,
+            omega_mean=0.0,
+            rng=random.Random(0),
+            true_means=true_means,
+            rho=0.5,
+            cost=3.5,
+        )
+
+        self.assertIsInstance(policy, PreScreen)
+        assert isinstance(policy, PreScreen)
+        self.assertEqual(policy.initial_regret, 3.5)
+        self.assertAlmostEqual(
+            float(np.corrcoef(policy.estimates, true_means)[0, 1]),
+            0.5,
+        )
+
+        fixed_target = policy.compute_target()
+        self.assertEqual(policy.compute_target(), fixed_target)
+        policy.update(
+            StepFeedback(
+                individual_rewards={worker_id: -100.0 for worker_id in fixed_target},
+                active_set=frozenset(fixed_target),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.compute_target(), fixed_target)
+
+    def test_pre_screen_initial_cost_is_charged_before_first_period(self) -> None:
+        _, results = simulate(
+            policies=["pre-screen"],
+            k=3,
+            m=1,
+            T=1,
+            means=[0.1, 0.9, 0.2],
+            c=0.0,
+            delay_upper=0,
+            rho=1.0,
+            cost=7.5,
+            n_runs=1,
+            seed0=0,
+        )
+
+        mean_curve, std_curve = results["pre-screen"]
+        self.assertAlmostEqual(float(mean_curve[0]), 7.5)
+        self.assertAlmostEqual(float(std_curve[0]), 0.0)
+
+    def test_fixed_schedule_greedy_reselects_team_on_review_schedule(self) -> None:
+        policy = FixedScheduleGreedy(k=3, m=1, review_interval=2, rng=random.Random(0))
 
         self.assertEqual(policy.act(self._StaticEnv({1})), [])
         self.assertEqual(policy.phase, "hold")
@@ -927,64 +1031,78 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(replacements, [(1, 3)])
 
     def test_make_policy_builds_work_trial_with_custom_schedule(self) -> None:
+        true_means = [0.1, 0.8, 0.4, 0.7]
         policy = make_policy(
             "WorkTrial",
             k=4,
             m=2,
             T=10,
             c=0.0,
-            omega_max=1,
+            omega_mean=1.0,
             rng=random.Random(0),
-            work_trial_periods=2,
+            true_means=true_means,
+            rho=0.5,
+            cost=4.0,
             work_trial_rotation_periods=7,
         )
 
         self.assertIsInstance(policy, WorkTrial)
         assert isinstance(policy, WorkTrial)
-        self.assertEqual(policy.trial_periods, 2)
+        self.assertAlmostEqual(
+            float(np.corrcoef(policy.prescreen_estimates, true_means)[0, 1]),
+            0.5,
+        )
+        self.assertEqual(policy.initial_regret, 4.0)
         self.assertEqual(policy.rotation_periods, 7)
 
-    def test_work_trial_moves_from_trial_stage_to_first_block(self) -> None:
-        policy = WorkTrial(k=4, m=1, trial_periods=1, rotation_periods=2, rng=random.Random(0))
+    def test_work_trial_uses_prescreen_before_rotation_blocks(self) -> None:
+        policy = WorkTrial(
+            k=4,
+            m=1,
+            true_means=[0.1, 0.4, 0.9, 0.8],
+            rho=1.0,
+            cost=2.0,
+            rotation_periods=2,
+            rng=random.Random(0),
+        )
 
-        self.assertEqual(policy.act(self._StaticEnv({1})), [])
-        self.assertEqual(policy.stage, "trial")
+        self.assertEqual(policy.initial_workforce, [3])
+        self.assertEqual(policy.shortlist, [3, 4])
+        self.assertEqual(policy.initial_regret, 2.0)
+        self.assertEqual(policy.act(self._StaticEnv({3})), [])
+        self.assertEqual(policy.stage, "first_block")
 
         policy.update(
             StepFeedback(
-                individual_rewards={1: 1.0},
-                active_set=frozenset({1}),
+                individual_rewards={3: 0.5},
+                active_set=frozenset({3}),
+                completed_this_period=(),
+                pending_count=0,
+            )
+        )
+        self.assertEqual(policy.phase, "hold")
+
+        policy.update(
+            StepFeedback(
+                individual_rewards={3: 0.6},
+                active_set=frozenset({3}),
                 completed_this_period=(),
                 pending_count=0,
             )
         )
         self.assertEqual(policy.phase, "ready")
+        self.assertEqual(policy.stage, "second_block")
 
-        replacements = policy.act(self._StaticEnv({1}))
-        self.assertEqual(replacements, [(1, 2)])
-
-        policy.current_target = {2}
-        policy.phase = "transition"
-        policy.update(
-            StepFeedback(
-                individual_rewards={2: 1.0},
-                active_set=frozenset({2}),
-                completed_this_period=(),
-                pending_count=0,
-            )
-        )
-        self.assertEqual(policy.phase, "ready")
-
-        replacements = policy.act(self._StaticEnv({2}))
-        self.assertEqual(replacements, [(2, 3)])
+        replacements = policy.act(self._StaticEnv({3}))
+        self.assertEqual(replacements, [(3, 4)])
 
     def test_build_planning_horizon_regret_table_uses_precomputed_results(self) -> None:
         rows = build_planning_horizon_regret_table(
-            series=[ExperimentSeries(policy_name="omm", label="OMM")],
+            series=[ExperimentSeries(policy_name="a-omm", label="A-OMM")],
             means=[0.9, 0.8, 0.1],
             m=2,
             results={
-                "OMM": (
+                "A-OMM": (
                     np.asarray([2.0, 6.0, 12.0], dtype=np.float64),
                     np.asarray([1.0, 3.0, 6.0], dtype=np.float64),
                 )
@@ -993,10 +1111,27 @@ class RegressionTests(unittest.TestCase):
         )
 
         self.assertEqual(rows[0]["horizon"], "Month 1")
-        self.assertAlmostEqual(float(rows[0]["OMM cumulative"]), 6.0)
-        self.assertAlmostEqual(float(rows[0]["OMM normalized"]), 3.0 / 1.7)
-        self.assertIsNone(rows[1]["OMM cumulative"])
-        self.assertIsNone(rows[1]["OMM normalized"])
+        self.assertAlmostEqual(float(rows[0]["A-OMM cumulative"]), 6.0)
+        self.assertAlmostEqual(float(rows[0]["A-OMM normalized"]), 3.0 / 1.7)
+        self.assertIsNone(rows[1]["A-OMM cumulative"])
+        self.assertIsNone(rows[1]["A-OMM normalized"])
+
+    def test_benchmark_metadata_sanitizes_custom_sampler_functions(self) -> None:
+        def reward_sampler() -> float:
+            return 1.0
+
+        metadata = _json_safe_metadata(
+            {
+                "simulate_kwargs": {
+                    "reward_samplers": [reward_sampler],
+                    "means": np.asarray([0.2, 0.8], dtype=np.float64),
+                }
+            }
+        )
+
+        json.dumps(metadata)
+        self.assertIn("<callable", metadata["simulate_kwargs"]["reward_samplers"][0])
+        self.assertEqual(metadata["simulate_kwargs"]["means"], [0.2, 0.8])
 
     def test_truncated_normal_samplers_are_bounded_and_match_target_mean(self) -> None:
         sampler = make_truncated_normal_samplers(
@@ -1027,6 +1162,36 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(np.all(draws >= 0.0))
         self.assertTrue(np.all(draws <= 1.0))
         self.assertAlmostEqual(float(draws.mean()), 0.25, delta=0.03)
+
+    def test_conditional_sampler_resamples_acceptance_each_draw(self) -> None:
+        acceptance_draws = iter([False, True, False, True])
+        reward_draws = iter([0.4, 0.8])
+        sampler = make_conditional_samplers(
+            accept=lambda: next(acceptance_draws),
+            reward=lambda: next(reward_draws),
+        )
+
+        self.assertEqual(
+            [sampler(), sampler(), sampler(), sampler()],
+            [0.0, 0.4, 0.0, 0.8],
+        )
+
+    def test_conditional_sampler_composes_sampler_sequences(self) -> None:
+        samplers = make_conditional_samplers(
+            accept=[lambda: False, lambda: True],
+            reward=[lambda: 0.4, lambda: 0.8],
+        )
+
+        self.assertEqual([sampler() for sampler in samplers], [0.0, 0.8])
+
+    def test_reward_samplers_accept_numpy_generator(self) -> None:
+        rng = np.random.default_rng(0)
+        bernoulli_sampler = make_bernoulli_samplers([1.0], rng)[0]
+        normal_sampler = make_truncated_normal_samplers([0.5], rng)[0]
+
+        self.assertEqual(bernoulli_sampler(), 1.0)
+        self.assertGreaterEqual(normal_sampler(), 0.0)
+        self.assertLessEqual(normal_sampler(), 1.0)
 
 
 if __name__ == "__main__":

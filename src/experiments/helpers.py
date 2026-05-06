@@ -13,20 +13,18 @@ from simulation import (
     print_planning_horizon_regret_table,
     run_series_simulations,
 )
-
-
-DEFAULT_CUMULATIVE_TITLE = "Cumulative Regret of Optimistic-Hire Compared to Benchmarks"
-DEFAULT_AVERAGE_TITLE = "Normalized Loss of Optimistic-Hire Compared to Benchmarks"
-DEFAULT_PLANNING_HORIZONS = (
-    ("1 month", 30 * 24),
-    ("12 months", 365 * 24),
-    ("3 years", 3 * 365 * 24),
-    ("5 years", 5 * 365 * 24),
+from experiments.simulation_setups.config_main import (
+    DEFAULT_AVERAGE_TITLE,
+    DEFAULT_CUMULATIVE_TITLE,
+    DEFAULT_PLANNING_HORIZONS,
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 def benchmark_output_dir(*, module_file: str, output_subdir: str) -> Path:
-    return Path(module_file).resolve().parents[2] / "artifacts" / output_subdir
+    return PROJECT_ROOT / "artifacts" / output_subdir
 
 
 def make_benchmark_means(
@@ -47,21 +45,21 @@ def default_benchmark_series(
 ) -> list[ExperimentSeries]:
     return [
         ExperimentSeries(
-            policy_name="optimistic-hire",
-            label="Optimistic-Hire",
+            policy_name="delayed-replace-ucb",
+            label="DR-UCB",
             sim_kwargs={"gamma": "auto"},
         ),
         ExperimentSeries(
-            policy_name="AHT",
-            label="AgrawalHegdeTeneketzis",
+            policy_name="a-aht",
+            label="Adapted-AHT",
         ),
         ExperimentSeries(
-            policy_name="OMM",
-            label="OMM",
+            policy_name="a-omm",
+            label="Adapted-OMM",
         ),
         ExperimentSeries(
-            policy_name="SemiAnnualReview",
-            label="Semi-Annual Review",
+            policy_name="FixedScheduleGreedy",
+            label="FixedScheduleGreedy",
         ),
         ExperimentSeries(
             policy_name="WorkTrial",
@@ -79,6 +77,37 @@ def _slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 
 
+def _json_safe_metadata(value: Any) -> Any:
+    """Convert metadata values to JSON-safe summaries without mutating them."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, np.generic):
+        return _json_safe_metadata(value.item())
+
+    if isinstance(value, np.ndarray):
+        return _json_safe_metadata(value.tolist())
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _json_safe_metadata(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_safe_metadata(item) for item in value]
+
+    if callable(value):
+        module = getattr(value, "__module__", value.__class__.__module__)
+        qualname = getattr(value, "__qualname__", value.__class__.__qualname__)
+        return f"<callable {module}.{qualname}>"
+
+    return f"<non-serializable {value.__class__.__module__}.{value.__class__.__qualname__}>"
+
+
 def _escape_latex(text: str) -> str:
     replacements = {
         "&": r"\&",
@@ -91,8 +120,8 @@ def _escape_latex(text: str) -> str:
 
 def _latex_display_label(label: str) -> str:
     mapping = {
-        "AgrawalHegdeTeneketzis": "AHT",
-        "Semi-Annual Review": "SemiAnnualReview",
+        "Adapted-AHT": "A-AHT",
+        "Adapted-OMM": "A-OMM",
     }
     return mapping.get(label, label)
 
@@ -245,6 +274,7 @@ def _resolve_curve_data(
     output_series: Sequence[ExperimentSeries],
     simulate_kwargs: Mapping[str, Any],
     average_title: str,
+    normalized_ylim: Optional[tuple[float, float]],
 ):
     mode = cache_mode.strip().lower()
     if mode not in {"auto", "load", "regenerate", "disabled"}:
@@ -261,7 +291,7 @@ def _resolve_curve_data(
             series=output_series,
             simulate_kwargs=simulate_kwargs,
             title=average_title,
-            ylim=(0, 0.25),
+            ylim=normalized_ylim,
             show_plot=False,
             precomputed=(means, results),
         )
@@ -297,7 +327,7 @@ def _resolve_curve_data(
         series=output_series,
         simulate_kwargs=simulate_kwargs,
         title=average_title,
-        ylim=(0, 0.25),
+        ylim=normalized_ylim,
         show_plot=False,
         precomputed=(means, results),
     )
@@ -347,6 +377,8 @@ def run_benchmark(
     curves_name: str = "benchmark_curves.npz",
     latex_table_name: str = "benchmark_planning_horizons_mean_pm_std.tex",
     metadata_name: str = "benchmark_metadata.json",
+    cumulative_ylim: Optional[tuple[float, float]] = (0, 100000),
+    normalized_ylim: Optional[tuple[float, float]] = (0, 0.25),
     save_artifacts: bool = True,
     show_plots: bool = True,
 ) -> None:
@@ -364,13 +396,14 @@ def run_benchmark(
         output_series=series,
         simulate_kwargs=simulate_kwargs,
         average_title=average_title,
+        normalized_ylim=normalized_ylim,
     )
 
     plot_regret_series(
         series=series,
         simulate_kwargs=simulate_kwargs,
         title=cumulative_title,
-        ylim=(0, 100000),
+        ylim=cumulative_ylim,
         save_path=str(output_dir / cumulative_plot_name) if save_artifacts and output_dir is not None else None,
         show_plot=show_plots,
         precomputed=(means, results),
@@ -382,7 +415,7 @@ def run_benchmark(
         simulate_kwargs=simulate_kwargs,
         title=average_title,
         ylabel="Normalized loss",
-        ylim=(0, 0.25),
+        ylim=normalized_ylim,
         y_axis_percent=True,
         save_path=str(output_dir / normalized_plot_name) if save_artifacts and output_dir is not None else None,
         show_plot=show_plots,
@@ -420,23 +453,22 @@ def run_benchmark(
         )
 
         with (output_dir / metadata_name).open("w") as handle:
-            json.dump(
-                {
-                    "simulate_kwargs": dict(simulate_kwargs),
-                    "planning_horizons": list(planning_horizons),
-                    "cumulative_title": cumulative_title,
-                    "average_title": average_title,
-                    "curve_cache_mode": curve_cache_mode,
-                    "artifacts": {
-                        "cumulative_plot": cumulative_plot_name,
-                        "normalized_plot": normalized_plot_name,
-                        "curves": curves_name,
-                        "latex_table": latex_table_name,
-                    },
+            metadata = {
+                "simulate_kwargs": dict(simulate_kwargs),
+                "planning_horizons": list(planning_horizons),
+                "cumulative_title": cumulative_title,
+                "average_title": average_title,
+                "curve_cache_mode": curve_cache_mode,
+                "cumulative_ylim": cumulative_ylim,
+                "normalized_ylim": normalized_ylim,
+                "artifacts": {
+                    "cumulative_plot": cumulative_plot_name,
+                    "normalized_plot": normalized_plot_name,
+                    "curves": curves_name,
+                    "latex_table": latex_table_name,
                 },
-                handle,
-                indent=2,
-            )
+            }
+            json.dump(_json_safe_metadata(metadata), handle, indent=2)
 
         print()
         print(f"Saved benchmark artifacts to {output_dir}")

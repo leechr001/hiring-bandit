@@ -1,6 +1,6 @@
 from bandit_environment import StepFeedback
 from bijections import (
-    optimistic_hire_rank_matching_bijection,
+    delayed_replace_ucb_rank_matching_bijection,
     random_bijection,
 )
 from choose_target import ChooseTargetFrontierSizeRecord, choose_target
@@ -15,7 +15,7 @@ from typing import List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 @dataclass
-class OptimisticHireConfig:
+class DelayedReplaceUCBConfig:
     k: int
     m: int
     gamma: float
@@ -27,9 +27,9 @@ class OptimisticHireConfig:
     screening_enabled: bool = True
 
 
-class OptimisticHire(StatefulDelayedActionPolicy):
+class DelayedReplaceUCB(StatefulDelayedActionPolicy):
     """
-    Implements Algorithm 1 (Optimistic-Hire).
+    Implements Algorithm 1 (DR-UCB).
 
     Assumptions about env:
     - env.active_set: current active set as an iterable of 1-indexed worker IDs.
@@ -88,7 +88,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
                 "pairing_rule must be 'rank-matching' or 'random'."
             )
 
-        self.cfg = OptimisticHireConfig(
+        self.cfg = DelayedReplaceUCBConfig(
             k=k,
             m=m,
             gamma=gamma,
@@ -257,7 +257,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         switching_cost: float = 0.0,
     ) -> Set[int]:
         """
-        Compute the optimistic target workforce U_ell.
+        Compute the UCB target workforce U_ell.
 
         When horizon screening is enabled, this solves the horizon-aware
         ChooseTarget subproblem from the paper. When screening is disabled for
@@ -411,7 +411,7 @@ class OptimisticHire(StatefulDelayedActionPolicy):
         """
         ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
         if self.cfg.pairing_rule == "rank-matching":
-            return optimistic_hire_rank_matching_bijection(
+            return delayed_replace_ucb_rank_matching_bijection(
                 current,
                 target,
                 ucb_values=ucb.tolist(),

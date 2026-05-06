@@ -5,7 +5,7 @@ Dynamic program for the horizon-aware ChooseTarget subroutine.
 from __future__ import annotations
 
 from bijections import (
-    optimistic_hire_switching_threshold,
+    delayed_replace_ucb_switching_threshold,
     rank_matching_add_order,
     rank_matching_remove_order,
 )
@@ -341,7 +341,7 @@ def choose_target(
     )
     ucb_sequence = ucb_values.tolist()
 
-    threshold = optimistic_hire_switching_threshold(
+    threshold = delayed_replace_ucb_switching_threshold(
         horizon=horizon,
         current_period=current_period,
         switching_cost=switching_cost,

@@ -1,20 +1,22 @@
 from bandit_environment import TemporaryHiringBanditEnv
 from policies import (
     EpsilonGreedyHiringPolicy,
-    OMM,
-    SemiAnnualReview,
+    AdaptedOMM,
+    FixedScheduleGreedy,
+    PreScreen,
     Threshold,
     WorkTrial,
-    AgrawalHegdeTeneketzisPolicy
+    AdaptedAHTPolicy
 )
 
 from choose_target import ChooseTargetFrontierSizeRecord
-from optimistic_hire import OptimisticHire
+from delayed_replace_ucb import DelayedReplaceUCB
 from samplers import (
     make_bernoulli_samplers, 
     make_calendar_adversarial_delay,
     make_calendar_delay_sampler,
     make_truncated_normal_samplers,
+    make_geometric_delay_sampler,
     make_uniform_delay_sampler, 
     make_adversarial_delay
 )
@@ -66,39 +68,163 @@ def _merge_sim_kwargs(
     return merged
 
 
+def _display_policy_name(policy_name: str) -> str:
+    mapping = {
+        "delayed-replace-ucb": "DR-UCB",
+        "delayed-replace-ucb-fixed-calendar": "DR-UCB + fixed calendar switching",
+        "delayed-replace-ucb-no-screen": "DR-UCB without horizon screening",
+        "delayed-replace-ucb-random-pairing": "DR-UCB + random pairing",
+        "a-aht": "A-AHT",
+        "a-aht-rm": "A-AHT with rank-matching bijection",
+        "a-aht-rmm": "A-AHT with rank-mismatching bijection",
+        "a-omm": "A-OMM",
+        "a-omm-rm": "A-OMM with rank-matching bijection",
+        "a-omm-rmm": "A-OMM with rank-mismatching bijection",
+        "pre-screen": "Pre-screen",
+    }
+    return mapping.get(policy_name.lower().strip(), policy_name)
+
+
+def _uses_policy_initial_workforce(policy_name: str) -> bool:
+    return policy_name.lower().strip() in {"pre-screen", "prescreen", "worktrial"}
+
+
+def _resolve_pre_screen_parameter(
+    *,
+    prefixed_value: float,
+    alias_value: Optional[float],
+    parameter_name: str,
+    default_value: float,
+) -> float:
+    if alias_value is None:
+        return float(prefixed_value)
+
+    if not math.isclose(float(prefixed_value), default_value) and not math.isclose(
+        float(prefixed_value),
+        float(alias_value),
+    ):
+        raise ValueError(
+            f"Pass either pre_screen_{parameter_name} or {parameter_name}, not both."
+        )
+
+    return float(alias_value)
+
+
+def _require_delay_upper(delay_upper: Optional[int], *, delay_process_name: str) -> int:
+    if delay_upper is None:
+        raise ValueError(f"delay_upper is required for {delay_process_name} delays.")
+    if delay_upper < 0:
+        raise ValueError("delay_upper must be non-negative.")
+    return int(delay_upper)
+
+
+def _resolve_geometric_delay_p(
+    *,
+    omega_mean: Optional[float],
+    delay_geom_p: Optional[float],
+    delay_lower: int,
+) -> float:
+    if delay_geom_p is not None:
+        if not (0.0 < delay_geom_p <= 1.0):
+            raise ValueError("delay_geom_p must satisfy 0 < p <= 1.")
+        return float(delay_geom_p)
+
+    if omega_mean is not None:
+        if omega_mean < delay_lower:
+            raise ValueError("omega_mean must be >= delay_lower for geometric delays.")
+        return 1.0 / (float(omega_mean) - float(delay_lower) + 1.0)
+
+    raise ValueError("omega_mean or delay_geom_p is required for geometric delays.")
+
+
+def _resolve_policy_omega_mean(
+    *,
+    omega_mean: Optional[float],
+    delay_process_name: str,
+    delay_lower: int,
+    delay_upper: Optional[int],
+    delay_geom_p: Optional[float],
+) -> float:
+    if omega_mean is not None:
+        if omega_mean < 0:
+            raise ValueError("omega_mean must be non-negative.")
+        return float(omega_mean)
+
+    if delay_process_name in {"geometric", "geom"} and delay_geom_p is not None:
+        return float(delay_lower) + (1.0 - float(delay_geom_p)) / float(delay_geom_p)
+
+    if delay_upper is not None and delay_process_name in {"adversarial", "calendar-adversarial"}:
+        return float(delay_upper)
+
+    if delay_upper is not None:
+        return 0.5 * (float(delay_lower) + float(delay_upper))
+
+    raise ValueError("omega_mean is required when it cannot be inferred from the delay process.")
+
+
 def make_delay_sampler_factory(
     delay_process_name: str,
     *,
     means: Sequence[float],
-    omega_max: int,
+    delay_upper: Optional[int] = None,
     delay_lower: int = 0,
+    delay_geom_p: Optional[float] = None,
+    omega_mean: Optional[float] = None,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
 ) -> Callable[[int], Callable]:
     if delay_process_name in {"uniform", "random", "stochastic", "iid"}:
+        bounded_delay_upper = _require_delay_upper(
+            delay_upper,
+            delay_process_name=delay_process_name,
+        )
         return lambda seed: make_uniform_delay_sampler(
-            omega_max=omega_max,
+            delay_upper=bounded_delay_upper,
             rng=_seeded_rng(seed, "delay"),
             delay_lower=delay_lower,
         )
+    if delay_process_name in {"geometric", "geom"}:
+        resolved_p = _resolve_geometric_delay_p(
+            omega_mean=omega_mean,
+            delay_geom_p=delay_geom_p,
+            delay_lower=delay_lower,
+        )
+        return lambda seed: make_geometric_delay_sampler(
+            p=resolved_p,
+            rng=_seeded_rng(seed, "delay"),
+            delay_lower=delay_lower,
+            delay_upper=delay_upper,
+        )
     if delay_process_name == "adversarial":
+        bounded_delay_upper = _require_delay_upper(
+            delay_upper,
+            delay_process_name=delay_process_name,
+        )
         return lambda seed: make_adversarial_delay(
             means=means,
-            omega_max=omega_max,
+            delay_upper=bounded_delay_upper,
         )
     if delay_process_name == "calendar-adversarial":
         if calendar_frequency is None:
             raise ValueError("calendar_frequency is required for calendar delays.")
+        bounded_delay_upper = _require_delay_upper(
+            delay_upper,
+            delay_process_name=delay_process_name,
+        )
 
         return lambda seed: make_calendar_adversarial_delay(
             means=means,
-            omega_max=omega_max,
+            delay_upper=bounded_delay_upper,
             frequency=calendar_frequency,
         )
     if delay_process_name in {"calendar", "calendar-unif", "calendar-geom"}:
         if calendar_frequency is None:
             raise ValueError("calendar_frequency is required for calendar delays.")
+        bounded_delay_upper = _require_delay_upper(
+            delay_upper,
+            delay_process_name=delay_process_name,
+        )
 
         distribution = calendar_distribution
         if delay_process_name == "calendar-unif":
@@ -107,7 +233,7 @@ def make_delay_sampler_factory(
             distribution = "geom"
 
         return lambda seed: make_calendar_delay_sampler(
-            omega_max,
+            bounded_delay_upper,
             frequency=calendar_frequency,
             distribution=distribution,
             geom_p=calendar_geom_p,
@@ -116,7 +242,7 @@ def make_delay_sampler_factory(
 
     raise ValueError(
         "delay_process_name must be one of: 'uniform', 'random', "
-        "'stochastic', 'iid', 'adversarial', 'calendar', "
+        "'stochastic', 'iid', 'geometric', 'geom', 'adversarial', 'calendar', "
         "'calendar-unif', 'calendar-geom', or 'calendar-adversarial'."
     )
 
@@ -220,7 +346,7 @@ def plot_regret_series(
     simulate_kwargs: Mapping[str, Any],
     title: str = "Regret by Policy",
     xlabel: str = "Time t",
-    ylabel: str = "Cumulative pseudo-regret",
+    ylabel: str = "Cumulative regret",
     figure_kwargs: Optional[Mapping[str, Any]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     grid_kwargs: Optional[Mapping[str, Any]] = None,
@@ -506,13 +632,13 @@ def plot_final_regret_sweep(
     return x_sorted, mean_sorted, std_sorted
 
 
-def _validate_optimistic_hire_auto_gamma_inputs(
+def _validate_delayed_replace_ucb_auto_gamma_inputs(
     *,
     k: int,
     m: int,
     T: int,
     c: float,
-    omega_max: float,
+    omega_mean: float,
 ) -> None:
     if k <= 0:
         raise ValueError("k must be positive.")
@@ -522,22 +648,22 @@ def _validate_optimistic_hire_auto_gamma_inputs(
         raise ValueError("T must be positive.")
     if c < 0:
         raise ValueError("c must be non-negative.")
-    if omega_max < 0:
-        raise ValueError("omega_max must be non-negative.")
+    if omega_mean < 0:
+        raise ValueError("omega_mean must be non-negative.")
 
 
-def _optimistic_hire_bound_components(
+def _delayed_replace_ucb_bound_components(
     *,
     k: int,
     m: int,
     T: int,
     c: float,
-    omega_max: float,
+    omega_mean: float,
 ) -> Tuple[float, float, float, float]:
     """Return the constant, gamma, sqrt(gamma), and 1/sqrt(gamma) coefficients."""
     log_T = math.log(T)
     if log_T <= 0.0:
-        raise ValueError("Optimistic-Hire auto gamma requires T > 1.")
+        raise ValueError("DR-UCB auto gamma requires T > 1.")
 
     log_ratio = math.log((m * T) / ((k - m) * log_T))
 
@@ -553,7 +679,7 @@ def _optimistic_hire_bound_components(
         + switching_term
         + k
         + (4.0 * m * k) / T
-        + (omega_max + c) * m * k
+        + (omega_mean + c) * m * k
     )
     gamma_coeff = float(k)
     sqrt_gamma_coeff = (
@@ -562,7 +688,7 @@ def _optimistic_hire_bound_components(
         * math.sqrt(4.0 * log_T)
         * (1.0 + 0.5 * log_ratio)
     )
-    inverse_sqrt_gamma_coeff = (omega_max + c) * m * math.sqrt(k * T)
+    inverse_sqrt_gamma_coeff = (omega_mean + c) * m * math.sqrt(k * T)
     return (
         constant_term,
         gamma_coeff,
@@ -571,33 +697,33 @@ def _optimistic_hire_bound_components(
     )
 
 
-def optimistic_hire_regret_bound(
+def delayed_replace_ucb_regret_bound(
     gamma: float,
     *,
     k: int,
     m: int,
     T: int,
     c: float,
-    omega_max: float,
+    omega_mean: float,
 ) -> float:
-    """Upper bound used to select an automatic gamma for Optimistic-Hire."""
-    _validate_optimistic_hire_auto_gamma_inputs(
+    """Upper bound used to select an automatic gamma for DR-UCB."""
+    _validate_delayed_replace_ucb_auto_gamma_inputs(
         k=k,
         m=m,
         T=T,
         c=c,
-        omega_max=omega_max,
+        omega_mean=omega_mean,
     )
     if gamma <= 0:
         raise ValueError("gamma must be > 0.")
 
     constant_term, gamma_coeff, sqrt_gamma_coeff, inverse_sqrt_gamma_coeff = (
-        _optimistic_hire_bound_components(
+        _delayed_replace_ucb_bound_components(
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
+            omega_mean=omega_mean,
         )
     )
     sqrt_gamma = math.sqrt(gamma)
@@ -610,30 +736,30 @@ def optimistic_hire_regret_bound(
     )
 
 
-def compute_optimistic_hire_auto_gamma(
+def compute_delayed_replace_ucb_auto_gamma(
     *,
     k: int,
     m: int,
     T: int,
     c: float,
-    omega_max: float,
+    omega_mean: float,
 ) -> float:
-    """Numerically minimize the Optimistic-Hire gamma bound over gamma > 0."""
-    _validate_optimistic_hire_auto_gamma_inputs(
+    """Numerically minimize the DR-UCB gamma bound over gamma > 0."""
+    _validate_delayed_replace_ucb_auto_gamma_inputs(
         k=k,
         m=m,
         T=T,
         c=c,
-        omega_max=omega_max,
+        omega_mean=omega_mean,
     )
 
     _, gamma_coeff, sqrt_gamma_coeff, inverse_sqrt_gamma_coeff = (
-        _optimistic_hire_bound_components(
+        _delayed_replace_ucb_bound_components(
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
+            omega_mean=omega_mean,
         )
     )
 
@@ -664,15 +790,79 @@ def compute_optimistic_hire_auto_gamma(
 
     return min(
         candidate_gammas,
-        key=lambda gamma: optimistic_hire_regret_bound(
+        key=lambda gamma: delayed_replace_ucb_regret_bound(
             gamma,
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
+            omega_mean=omega_mean,
         ),
     )
+
+
+def _parse_delayed_replace_ucb_auto_gamma_mean(
+    gamma: str,
+    *,
+    omega_mean: float,
+) -> float:
+    normalized = gamma.strip().lower()
+    if normalized == "auto":
+        return float(omega_mean)
+
+    if not normalized.startswith("auto"):
+        raise ValueError(
+            "gamma must be a positive float, 'auto', or 'auto<n>' "
+            "where <n> is the delay scale for auto-gamma calibration."
+        )
+
+    suffix = normalized[len("auto"):].strip()
+    if suffix[:1] in {"-", ":", "=", "_"}:
+        suffix = suffix[1:].strip()
+    if not suffix:
+        raise ValueError(
+            "gamma auto override must include a numeric delay scale, "
+            "for example 'auto0' or 'auto-2.5'."
+        )
+
+    try:
+        parsed_omega_mean = float(suffix)
+    except ValueError as exc:
+        raise ValueError(
+            "gamma auto override must include a numeric delay scale, "
+            "for example 'auto0' or 'auto-2.5'."
+        ) from exc
+
+    if parsed_omega_mean < 0.0:
+        raise ValueError("auto-gamma delay-scale override must be non-negative.")
+
+    return parsed_omega_mean
+
+
+def _resolve_delayed_replace_ucb_gamma(
+    gamma: float | str,
+    *,
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+    omega_mean: float,
+) -> float:
+    if isinstance(gamma, str):
+        gamma_omega_mean = _parse_delayed_replace_ucb_auto_gamma_mean(
+            gamma,
+            omega_mean=omega_mean,
+        )
+        return compute_delayed_replace_ucb_auto_gamma(
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_mean=gamma_omega_mean,
+        )
+
+    return float(gamma)
+
 
 def make_policy(
     policy_name: str,
@@ -681,13 +871,17 @@ def make_policy(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
     rng: random.Random,
+    omega_mean: float = 0.0,
+    true_means: Optional[Sequence[float]] = None,
     epsilon: float = 0.1,
     review_interval: int = 6 * 30 * 24,
-    work_trial_periods: int = 1,
     work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
+    pre_screen_rho: float = 1.0,
+    pre_screen_cost: float = 0.0,
+    rho: Optional[float] = None,
+    cost: Optional[float] = None,
     ucb_coef: float = 2.0,
     gamma: float | str = "auto",
     log_frontier_sizes: bool = False,
@@ -697,64 +891,107 @@ def make_policy(
 
     Supported names after lowercasing:
       - "epsilon-greedy"
-      - "semiannualreview"
+      - "fixedschedulegreedy"
       - "worktrial"
       - "threshold"
-      - "omm"
-      - "omm-rm"
-      - "omm-rmm"
-      - "optimistic-hire"
-      - "optimistic-hire-fixed-calendar"
-      - "optimistic-hire-no-screen"
-      - "optimistic-hire-random-pairing"
-      - "aht"
-      - "aht-rm"
-      - "aht-rmm"
+      - "pre-screen"
+      - "a-omm"
+      - "a-omm-rm"
+      - "a-omm-rmm"
+      - "delayed-replace-ucb"
+      - "delayed-replace-ucb-fixed-calendar"
+      - "delayed-replace-ucb-no-screen"
+      - "delayed-replace-ucb-random-pairing"
+      - "a-aht"
+      - "a-aht-rm"
+      - "a-aht-rmm"
     """
     name = policy_name.lower().strip()
 
     if name == "epsilon-greedy":
         return EpsilonGreedyHiringPolicy(k=k, m=m, epsilon=epsilon, rng=rng)
 
-    elif name == "semiannualreview":
-        return SemiAnnualReview(k=k, m=m, review_interval=review_interval, rng=rng)
+    elif name == "fixedschedulegreedy":
+        return FixedScheduleGreedy(
+            k=k,
+            m=m,
+            review_interval=review_interval,
+            omega_mean=omega_mean,
+            rng=rng,
+        )
 
     elif name == "worktrial":
+        if true_means is None:
+            raise ValueError("true_means is required for the WorkTrial pre-screen.")
+        resolved_rho = _resolve_pre_screen_parameter(
+            prefixed_value=pre_screen_rho,
+            alias_value=rho,
+            parameter_name="rho",
+            default_value=1.0,
+        )
+        resolved_cost = _resolve_pre_screen_parameter(
+            prefixed_value=pre_screen_cost,
+            alias_value=cost,
+            parameter_name="cost",
+            default_value=0.0,
+        )
         return WorkTrial(
             k=k,
             m=m,
-            trial_periods=work_trial_periods,
+            true_means=true_means,
+            rho=resolved_rho,
+            cost=resolved_cost,
             rotation_periods=work_trial_rotation_periods,
+            omega_mean=omega_mean,
             rng=rng,
         )
 
     elif name == "threshold":
-        return Threshold(k=k, m=m, threshold=threshold, rng=rng)
+        return Threshold(k=k, m=m, threshold=threshold, omega_mean=omega_mean, rng=rng)
 
-    elif name == "omm":
-        return OMM(k=k, m=m, alpha=ucb_coef, rng=rng)
+    elif name in {"pre-screen", "prescreen"}:
+        if true_means is None:
+            raise ValueError("true_means is required for the pre-screen policy.")
+        resolved_rho = _resolve_pre_screen_parameter(
+            prefixed_value=pre_screen_rho,
+            alias_value=rho,
+            parameter_name="rho",
+            default_value=1.0,
+        )
+        resolved_cost = _resolve_pre_screen_parameter(
+            prefixed_value=pre_screen_cost,
+            alias_value=cost,
+            parameter_name="cost",
+            default_value=0.0,
+        )
+        return PreScreen(
+            k=k,
+            m=m,
+            true_means=true_means,
+            rho=resolved_rho,
+            cost=resolved_cost,
+            rng=rng,
+        )
 
-    elif name in {"omm-rm"}:
-        return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', rng=rng)
+    elif name == "a-omm":
+        return AdaptedOMM(k=k, m=m, alpha=ucb_coef, omega_mean=omega_mean, rng=rng)
 
-    elif name in {"omm-rmm"}:
-        return OMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', rng=rng)
+    elif name in {"a-omm-rm"}:
+        return AdaptedOMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-match', omega_mean=omega_mean, rng=rng)
 
-    elif name == "optimistic-hire":
-        resolved_gamma: float
-        if gamma == "auto":
-            resolved_gamma = compute_optimistic_hire_auto_gamma(
-                k=k,
-                m=m,
-                T=T,
-                c=c,
-                omega_max=omega_max,
-            )
-        elif isinstance(gamma, str):
-            raise ValueError("gamma must be a positive float or 'auto'.")
-        else:
-            resolved_gamma = float(gamma)
-        return OptimisticHire(
+    elif name in {"a-omm-rmm"}:
+        return AdaptedOMM(k=k, m=m, alpha=ucb_coef, bijection_name='oracle-mismatch', omega_mean=omega_mean, rng=rng)
+
+    elif name == "delayed-replace-ucb":
+        resolved_gamma = _resolve_delayed_replace_ucb_gamma(
+            gamma,
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_mean=omega_mean,
+        )
+        return DelayedReplaceUCB(
             k=k,
             m=m,
             gamma=resolved_gamma,
@@ -763,15 +1000,16 @@ def make_policy(
             log_frontier_sizes=log_frontier_sizes,
         )
 
-    elif name == "optimistic-hire-fixed-calendar":
-        resolved_gamma = compute_optimistic_hire_auto_gamma(
+    elif name == "delayed-replace-ucb-fixed-calendar":
+        resolved_gamma = _resolve_delayed_replace_ucb_gamma(
+            gamma,
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
-        ) if gamma == "auto" else float(gamma)
-        return OptimisticHire(
+            omega_mean=omega_mean,
+        )
+        return DelayedReplaceUCB(
             k=k,
             m=m,
             gamma=resolved_gamma,
@@ -781,15 +1019,16 @@ def make_policy(
             switching_mode="fixed-calendar",
         )
 
-    elif name == "optimistic-hire-no-screen":
-        resolved_gamma = compute_optimistic_hire_auto_gamma(
+    elif name == "delayed-replace-ucb-no-screen":
+        resolved_gamma = _resolve_delayed_replace_ucb_gamma(
+            gamma,
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
-        ) if gamma == "auto" else float(gamma)
-        return OptimisticHire(
+            omega_mean=omega_mean,
+        )
+        return DelayedReplaceUCB(
             k=k,
             m=m,
             gamma=resolved_gamma,
@@ -799,15 +1038,16 @@ def make_policy(
             screening_enabled=False,
         )
 
-    elif name == "optimistic-hire-random-pairing":
-        resolved_gamma = compute_optimistic_hire_auto_gamma(
+    elif name == "delayed-replace-ucb-random-pairing":
+        resolved_gamma = _resolve_delayed_replace_ucb_gamma(
+            gamma,
             k=k,
             m=m,
             T=T,
             c=c,
-            omega_max=omega_max,
-        ) if gamma == "auto" else float(gamma)
-        return OptimisticHire(
+            omega_mean=omega_mean,
+        )
+        return DelayedReplaceUCB(
             k=k,
             m=m,
             gamma=resolved_gamma,
@@ -817,22 +1057,24 @@ def make_policy(
             pairing_rule="random",
         )
 
-    elif name == "aht":
-        return AgrawalHegdeTeneketzisPolicy(k=k, m=m, rng=rng)
+    elif name == "a-aht":
+        return AdaptedAHTPolicy(k=k, m=m, omega_mean=omega_mean, rng=rng)
 
-    elif name in {"aht-rm"}:
-        return AgrawalHegdeTeneketzisPolicy(
+    elif name in {"a-aht-rm"}:
+        return AdaptedAHTPolicy(
             k=k,
             m=m,
             bijection_name="oracle-match",
+            omega_mean=omega_mean,
             rng=rng,
         )
 
-    elif name in {"aht-rmm"}:
-        return AgrawalHegdeTeneketzisPolicy(
+    elif name in {"a-aht-rmm"}:
+        return AdaptedAHTPolicy(
             k=k,
             m=m,
             bijection_name="oracle-mismatch",
+            omega_mean=omega_mean,
             rng=rng,
         )
 
@@ -853,14 +1095,15 @@ def run_episode(
     work_trial_periods: int,
     work_trial_rotation_periods: int,
     threshold: float,
+    pre_screen_rho: float,
+    pre_screen_cost: float,
     gamma: float | str,
     c: float,
-    omega_max: int,
+    omega_mean: float,
     seed: int,
     frontier_size_log: list[ChooseTargetFrontierSizeRecord] | None = None,
 ) -> np.ndarray:
     rng = random.Random(seed)
-
     initial = rng.sample(list(range(1, k + 1)), m)
 
     env = TemporaryHiringBanditEnv(
@@ -869,7 +1112,7 @@ def run_episode(
         reward_samplers=reward_samplers,
         delay_sampler=delay_sampler,
         c=c,
-        omega_max=omega_max,
+        omega_mean=omega_mean,
         rng=rng,
         true_means=means,
         initial_workforce=initial,
@@ -881,14 +1124,15 @@ def run_episode(
         m=m,
         T=T,
         c=c,
-        omega_max=omega_max,
+        omega_mean=omega_mean,
         rng=rng,
+        true_means=means,
         epsilon=epsilon,
         review_interval=review_interval,
-        work_trial_periods=work_trial_periods,
         work_trial_rotation_periods=work_trial_rotation_periods,
         threshold=threshold,
-        ucb_coef=2.0,  # adjust if you want different default exploration strength
+        pre_screen_rho=pre_screen_rho,
+        pre_screen_cost=pre_screen_cost,
         gamma=gamma,
         log_frontier_sizes=frontier_size_log is not None,
     )
@@ -897,6 +1141,7 @@ def run_episode(
     if oracle_per_period is None:
         raise ValueError("True means required for regret simulation.")
 
+    initial_regret = float(getattr(policy, "initial_regret", 0.0))
     regret_increments = np.zeros(T, dtype=np.float64)
 
     for _ in range(T):
@@ -908,16 +1153,16 @@ def run_episode(
         active_now = feedback.active_set
         active_expected = sum(means[i - 1] for i in active_now)
 
-        # Pseudo-regret increment: gap to oracle + switching cost
+        # regret increment: gap to oracle + switching cost
         regret_increments[env.t - 2] = (oracle_per_period - active_expected) + cost
 
-    if frontier_size_log is not None and isinstance(policy, OptimisticHire):
+    if frontier_size_log is not None and isinstance(policy, DelayedReplaceUCB):
         frontier_size_log.extend(
             replace(record, policy_name=policy_name, episode_seed=seed)
             for record in policy.frontier_size_log
         )
 
-    return np.cumsum(regret_increments)
+    return np.cumsum(regret_increments) + initial_regret
 
 
 def _run_episode_worker(
@@ -932,6 +1177,8 @@ def _run_episode_worker(
     reward_upper: float,
     delay_process_name: str,
     delay_lower: int,
+    delay_geom_p: Optional[float],
+    delay_upper: Optional[int],
     calendar_frequency: Optional[int],
     calendar_distribution: str,
     calendar_geom_p: float,
@@ -941,9 +1188,11 @@ def _run_episode_worker(
     work_trial_periods: int,
     work_trial_rotation_periods: int,
     threshold: float,
+    pre_screen_rho: float,
+    pre_screen_cost: float,
     gamma: float | str,
     c: float,
-    omega_max: int,
+    omega_mean: float,
     seed: int,
 ) -> np.ndarray:
     reward_sampler_factory = make_reward_sampler_factory(
@@ -956,8 +1205,10 @@ def _run_episode_worker(
     delay_sampler_factory = make_delay_sampler_factory(
         delay_process_name,
         means=means,
-        omega_max=omega_max,
+        delay_upper=delay_upper,
+        omega_mean=omega_mean,
         delay_lower=delay_lower,
+        delay_geom_p=delay_geom_p,
         calendar_frequency=calendar_frequency,
         calendar_distribution=calendar_distribution,
         calendar_geom_p=calendar_geom_p,
@@ -975,9 +1226,11 @@ def _run_episode_worker(
         work_trial_periods=work_trial_periods,
         work_trial_rotation_periods=work_trial_rotation_periods,
         threshold=threshold,
+        pre_screen_rho=pre_screen_rho,
+        pre_screen_cost=pre_screen_cost,
         gamma=gamma,
         c=c,
-        omega_max=omega_max,
+        omega_mean=omega_mean,
         seed=seed,
     )
 
@@ -1002,6 +1255,9 @@ def simulate(
     reward_upper: float = 1.0,
     delay_process_name: str = "uniform",
     delay_lower: int = 0,
+    delay_upper: Optional[int] = None,
+    delay_geom_p: Optional[float] = None,
+    omega_mean: Optional[float] = None,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1010,9 +1266,12 @@ def simulate(
     work_trial_periods: int = 1,
     work_trial_rotation_periods: int = 90 * 24,
     threshold: float = 0.5,
+    pre_screen_rho: float = 1.0,
+    pre_screen_cost: float = 0.0,
+    rho: Optional[float] = None,
+    cost: Optional[float] = None,
     gamma: float | str = "auto",
     c: float = 1,
-    omega_max: int = 3,
     frontier_size_log: list[ChooseTargetFrontierSizeRecord] | None = None,
     n_runs: int = 50,
     n_jobs: int = 1,
@@ -1032,6 +1291,26 @@ def simulate(
 
     if means is None:
         means = sorted([rng.uniform(0.1, 0.9) for _ in range(k)], reverse=True)
+
+    pre_screen_rho = _resolve_pre_screen_parameter(
+        prefixed_value=pre_screen_rho,
+        alias_value=rho,
+        parameter_name="rho",
+        default_value=1.0,
+    )
+    pre_screen_cost = _resolve_pre_screen_parameter(
+        prefixed_value=pre_screen_cost,
+        alias_value=cost,
+        parameter_name="cost",
+        default_value=0.0,
+    )
+    resolved_omega_mean = _resolve_policy_omega_mean(
+        omega_mean=omega_mean,
+        delay_process_name=delay_process_name,
+        delay_lower=delay_lower,
+        delay_upper=delay_upper,
+        delay_geom_p=delay_geom_p,
+    )
     
     if reward_samplers is None and reward_sampler_factory is None:
         reward_sampler_factory = make_reward_sampler_factory(
@@ -1046,8 +1325,10 @@ def simulate(
         delay_sampler_factory = make_delay_sampler_factory(
             delay_process_name,
             means=means,
-            omega_max=omega_max,
+            delay_upper=delay_upper,
+            omega_mean=resolved_omega_mean,
             delay_lower=delay_lower,
+            delay_geom_p=delay_geom_p,
             calendar_frequency=calendar_frequency,
             calendar_distribution=calendar_distribution,
             calendar_geom_p=calendar_geom_p,
@@ -1103,9 +1384,11 @@ def simulate(
                         work_trial_periods=work_trial_periods,
                         work_trial_rotation_periods=work_trial_rotation_periods,
                         threshold=threshold,
+                        pre_screen_rho=pre_screen_rho,
+                        pre_screen_cost=pre_screen_cost,
                         gamma=gamma,
                         c=c,
-                        omega_max=omega_max,
+                        omega_mean=resolved_omega_mean,
                         seed=episode_seed,
                         frontier_size_log=frontier_size_log,
                     )
@@ -1129,6 +1412,9 @@ def simulate(
                     "reward_upper": reward_upper,
                     "delay_process_name": delay_process_name,
                     "delay_lower": delay_lower,
+                    "delay_upper": delay_upper,
+                    "delay_geom_p": delay_geom_p,
+                    "omega_mean": resolved_omega_mean,
                     "calendar_frequency": calendar_frequency,
                     "calendar_distribution": calendar_distribution,
                     "calendar_geom_p": calendar_geom_p,
@@ -1138,9 +1424,10 @@ def simulate(
                     "work_trial_periods": work_trial_periods,
                     "work_trial_rotation_periods": work_trial_rotation_periods,
                     "threshold": threshold,
+                    "pre_screen_rho": pre_screen_rho,
+                    "pre_screen_cost": pre_screen_cost,
                     "gamma": gamma,
                     "c": c,
-                    "omega_max": omega_max,
                     "seed": seed0 + r,
                 }
                 for r in range(n_runs)
@@ -1174,10 +1461,11 @@ def run_policy_comparisons(
     m: int,
     T: int,
     c: float,
-    omega_max: int,
+    delay_upper: Optional[int],
     means: Sequence[float],
     delay_process_name: str = 'uniform',
     delay_lower: int = 0,
+    omega_mean: Optional[float] = None,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1201,11 +1489,12 @@ def run_policy_comparisons(
         "means": means,
         "delay_process_name": delay_process_name,
         "delay_lower": delay_lower,
+        "delay_upper": delay_upper,
+        "omega_mean": omega_mean,
         "calendar_frequency": calendar_frequency,
         "calendar_distribution": calendar_distribution,
         "calendar_geom_p": calendar_geom_p,
         "c": c,
-        "omega_max": omega_max,
         "n_runs": n_runs,
         "n_jobs": n_jobs,
         "seed0": base_seed,
@@ -1238,13 +1527,14 @@ def run_gamma_sweep(
     means: Sequence[float],
     gammas: Sequence[float],
     c: float,
-    omega_max: int,
+    delay_upper: Optional[int],
+    omega_mean: Optional[float] = None,
     n_runs: int = 20,
     base_seed: int = 12345,
 ) -> None:
     series = [
         ExperimentSeries(
-            policy_name="optimistic-hire",
+            policy_name="delayed-replace-ucb",
             label=rf"$\gamma={float(gamma):.2f}$",
             sim_kwargs={"gamma": float(gamma)},
             plot_kwargs={"linewidth": 2},
@@ -1259,11 +1549,12 @@ def run_gamma_sweep(
             "T": T,
             "means": means,
             "c": c,
-            "omega_max": omega_max,
+            "delay_upper": delay_upper,
+            "omega_mean": omega_mean,
             "n_runs": n_runs,
             "seed0": base_seed,
         },
-        title=rf"Average regret over {n_runs} runs with $c = {c}$ and $\omega_\max = {omega_max}$",
+        title=rf"Average regret over {n_runs} runs with $c = {c}$ and delay upper = {delay_upper}",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},
@@ -1276,12 +1567,13 @@ def run_c_sweep(
     k: int,
     m: int,
     T: int,
-    policy_name: str = 'optimistic-hire',
+    policy_name: str = 'delayed-replace-ucb',
     means: Sequence[float],
     c_values: Sequence[float],
-    omega_max: int,
+    delay_upper: Optional[int],
     delay_process_name: str = "uniform",
     delay_lower: int = 0,
+    omega_mean: Optional[float] = None,
     calendar_frequency: Optional[int] = None,
     calendar_distribution: str = "geom",
     calendar_geom_p: float = 0.5,
@@ -1310,15 +1602,16 @@ def run_c_sweep(
             "means": means,
             "delay_process_name": delay_process_name,
             "delay_lower": delay_lower,
+            "delay_upper": delay_upper,
+            "omega_mean": omega_mean,
             "calendar_frequency": calendar_frequency,
             "calendar_distribution": calendar_distribution,
             "calendar_geom_p": calendar_geom_p,
-            "omega_max": omega_max,
             "n_runs": n_runs,
             "n_jobs": n_jobs,
             "seed0": base_seed,
         },
-        title=rf"Cumulative regret of {policy_name} across switching costs.",
+        title=rf"Cumulative regret of {_display_policy_name(policy_name)} across switching costs.",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},
@@ -1333,7 +1626,7 @@ def run_omega_sweep(
     k: int,
     m: int,
     T: int,
-    policy_name: str = 'optimistic-hire',
+    policy_name: str = 'delayed-replace-ucb',
     means: Sequence[float],
     c: float,
     omega_values: Sequence[float],
@@ -1366,10 +1659,11 @@ def run_omega_sweep(
             delay_lower = max(0, int(math.ceil(stochastic_lower_fraction * omega_value)))
             delay_upper = max(delay_lower, rounded_value)
             return (
-                rf"$\omega_\max={rounded_value}$",
+                rf"delay upper = {rounded_value}",
                 {
-                    "omega_max": delay_upper,
+                    "delay_upper": delay_upper,
                     "delay_lower": delay_lower,
+                    "omega_mean": 0.5 * (delay_lower + delay_upper),
                     "delay_process_name": delay_name,
                 },
             )
@@ -1382,16 +1676,18 @@ def run_omega_sweep(
             return (
                 rf"$E [\omega]={int(round(expected_delay))}$",
                 {
-                    "omega_max": delay_upper,
+                    "delay_upper": delay_upper,
                     "delay_lower": delay_lower,
+                    "omega_mean": expected_delay,
                     "delay_process_name": delay_name,
                 },
             )
 
         return (
-            rf"$\omega_\max={rounded_value}$",
+            rf"delay upper = {rounded_value}",
             {
-                "omega_max": rounded_value,
+                "delay_upper": rounded_value,
+                "omega_mean": float(rounded_value),
                 "delay_process_name": delay_name,
             },
         )
@@ -1420,7 +1716,7 @@ def run_omega_sweep(
             "n_jobs": n_jobs,
             "seed0": base_seed,
         },
-        title=rf"Cumulative regret of {policy_name} with {omega_process} delays.",
+        title=rf"Cumulative regret of {_display_policy_name(policy_name)} with {omega_process} delays.",
         xlabel="t",
         ylabel="Cumulative regret",
         figure_kwargs={"figsize": (8, 5)},

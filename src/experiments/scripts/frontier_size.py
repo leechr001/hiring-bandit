@@ -1,33 +1,29 @@
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 import numpy as np
 
 from choose_target import ChooseTargetFrontierSizeRecord
+from experiments.helpers import benchmark_output_dir
+from experiments.simulation_setups.config_main import (
+    BASE_SEED,
+    HORIZON,
+    K,
+    M,
+    N_JOBS,
+    N_RUNS,
+    OMEGA_MEAN,
+    PERFORMANCE_MEANS,
+    SWITCHING_COST,
+)
 from simulation import simulate
 
 
-# Problem setup
-k = 150
-m = 100
-T = 5 * 365 * 24
-c = 8
-omega_max = 8
-delay_lower = 8
-gamma = "auto"
-n_runs = 20
-n_jobs = 1
-base_seed = 12345
 show_plot = False
 
-rng = np.random.default_rng(base_seed)
-means = rng.uniform(0.3, 0.7, size=k).tolist()
-
-output_dir = Path(__file__).resolve().parents[2] / "artifacts" / "frontier_size"
+output_dir = benchmark_output_dir(module_file=__file__, output_subdir="frontier_size")
 output_dir.mkdir(parents=True, exist_ok=True)
-output_path = output_dir / "optimistic_hire_frontier_size.png"
+output_path = output_dir / "delayed_replace_ucb_frontier_size.png"
 trend_grid_size = 300
-trend_bandwidth = T / 40.0
+trend_bandwidth = HORIZON / 40.0
 
 
 def _decision_time(record: ChooseTargetFrontierSizeRecord) -> int:
@@ -93,18 +89,18 @@ def main() -> None:
     frontier_log: list[ChooseTargetFrontierSizeRecord] = []
 
     simulate(
-        policies=["optimistic-hire"],
-        k=k,
-        m=m,
-        T=T,
-        means=means,
-        c=c,
-        omega_max=omega_max,
-        delay_lower=delay_lower,
-        gamma=gamma,
-        n_runs=n_runs,
-        n_jobs=n_jobs,
-        seed0=base_seed,
+        policies=["delayed-replace-ucb"],
+        k=K,
+        m=M,
+        T=HORIZON,
+        means=PERFORMANCE_MEANS,
+        c=SWITCHING_COST,
+        delay_process_name="geometric",
+        omega_mean=OMEGA_MEAN,
+        gamma=f"auto={OMEGA_MEAN}",
+        n_runs=N_RUNS,
+        n_jobs=N_JOBS,
+        seed0=BASE_SEED,
         frontier_size_log=frontier_log,
     )
 
@@ -139,7 +135,7 @@ def main() -> None:
     )
     ax.set_xlabel("t")
     ax.set_ylabel("Frontier size")
-    ax.set_title(f"Frontier Size Over Time ({n_runs} runs)")
+    ax.set_title(f"Frontier Size Over Time ({N_RUNS} runs)")
     ax.grid(True, alpha=0.3)
     ax.legend(loc="upper right")
 
