@@ -1,8 +1,6 @@
 from experiments.helpers import run_benchmark
-from experiments.simulation_setups.config_main import (
+from experiments.simulation_setups.config_main_5_25 import (
     BENCHMARK_SERIES,
-    HEURISTIC_SERIES,
-    BANDIT_SERIES,
     DEFAULT_AVERAGE_TITLE,
     DEFAULT_CUMULATIVE_TITLE,
     DEFAULT_PLANNING_HORIZONS,

@@ -21,7 +21,7 @@ show_plot = False
 
 output_dir = benchmark_output_dir(module_file=__file__, output_subdir="frontier_size")
 output_dir.mkdir(parents=True, exist_ok=True)
-output_path = output_dir / "delayed_replace_ucb_frontier_size.png"
+output_path = output_dir / "frontier_size.png"
 trend_grid_size = 300
 trend_bandwidth = HORIZON / 40.0
 

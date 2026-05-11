@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
-from samplers import make_bernoulli_samplers
+from samplers import make_uniform_samplers
 
 
 BASE_SEED = 1
 
 K = 25
 M = 10
-T = HORIZON = 365*3
-SWITCHING_COST = 3
+T = HORIZON = 365*5
+SWITCHING_COST = 5
 
 OMEGA_MEAN = 3
 
@@ -21,10 +21,12 @@ PERFORMANCE_MEANS = np.clip(
     rng.normal(0.5, 0.3, size=K), 
     0,1).tolist()
 
-PERFORMANCE_SAMPLERS = make_bernoulli_samplers(
-    means=PERFORMANCE_MEANS,
-    rng=rng)
+gaps = [min(0.1, abs(x), abs(1-x)) for x in PERFORMANCE_MEANS]
+intervals = [(x - gap, x + gap) for (x,gap) in zip(PERFORMANCE_MEANS, gaps)]
 
+PERFORMANCE_SAMPLERS = make_uniform_samplers(
+    intervals=intervals,
+    rng=rng)
 
 
 def delay_kwargs_for_omega_mean(

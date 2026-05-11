@@ -148,21 +148,25 @@ def _build_latex_table(
     results,
     normalized_results,
     horizons: Sequence[tuple[str, int]],
+    m: Optional[int] = None,
 ) -> str:
     labels = [spec.label or spec.policy_name for spec in output_series]
 
-    def build_subtable(table_labels, formatter, source_results) -> list[str]:
+    def build_subtable(formatter, source_results) -> list[str]:
         lines: list[str] = []
-        lines.append(r"\begin{tabular*}{\linewidth}{@{\extracolsep{\fill}} l r r r}")
+        column_spec = " ".join(["l"] + ["r"] * len(labels))
+        lines.append(
+            rf"\begin{{tabular*}}{{\linewidth}}{{@{{\extracolsep{{\fill}}}} {column_spec}}}"
+        )
         lines.append(r"\toprule")
-        header = ["Horizon"] + [_escape_latex(_latex_display_label(label)) for label in table_labels]
+        header = ["Horizon"] + [_escape_latex(_latex_display_label(label)) for label in labels]
         lines.append(" & ".join(header) + r" \\")
         lines.append(r"\midrule")
 
         for horizon_label, horizon_period in horizons:
             idx = int(horizon_period) - 1
             row = [_escape_latex(str(horizon_label))]
-            for label in table_labels:
+            for label in labels:
                 mean_curve, std_curve = source_results[label]
                 row.append(formatter(float(mean_curve[idx]), float(std_curve[idx])))
             lines.append(" & ".join(row) + r" \\")
@@ -171,11 +175,10 @@ def _build_latex_table(
         lines.append(r"\end{tabular*}")
         return lines
 
-    label_groups = [
-        labels[group_start:group_start + 3]
-        for group_start in range(0, len(labels), 3)
-        if labels[group_start:group_start + 3]
-    ]
+    def caption_with_m(caption: str) -> str:
+        if m is None:
+            return caption
+        return rf"{caption} \((m={int(m)})\)"
 
     def append_metric_section(
         lines: list[str],
@@ -183,39 +186,25 @@ def _build_latex_table(
         formatter,
         source_results,
         caption: str,
-        label: str,
     ) -> None:
-        lines.append(r"    \small")
-        lines.append(r"    \setlength{\tabcolsep}{4pt}")
-        lines.append(r"    ")
-
-        for group_index, table_labels in enumerate(label_groups):
-            if group_index > 0:
-                lines.append(r"    ")
-                lines.append(r"    \vspace{0.5em}")
-                lines.append(r"    ")
-            for line in build_subtable(table_labels, formatter, source_results):
-                lines.append(f"    {line}")
-
-        lines.append(r"    ")
-        lines.append(f"    \\caption{{{caption}}}")
-        lines.append(f"    \\label{{{label}}}")
+        for line in build_subtable(formatter, source_results):
+            lines.append(line)
+        lines.append(f"\\caption{{{caption_with_m(caption)}}}")
 
     lines: list[str] = []
-    lines.append(r"\begin{table}[t]")
-    lines.append(r"    \centering")
-    lines.append("")
 
     append_metric_section(
         lines,
         formatter=_format_cumulative,
         source_results=results,
         caption="Cumulative regret across policies and planning horizons.",
-        label="tab:cumulative-regret",
     )
 
     lines.append("")
-    lines.append(r"    \vspace{1em}")
+    lines.append(r"\vspace{1em}")
+    lines.append("")
+    lines.append(r"\small")
+    lines.append(r"\setlength{\tabcolsep}{4pt}")
     lines.append("")
 
     append_metric_section(
@@ -223,10 +212,8 @@ def _build_latex_table(
         formatter=_format_normalized,
         source_results=normalized_results,
         caption="Normalized loss across policies and planning horizons.",
-        label="tab:loss-percent",
     )
 
-    lines.append(r"\end{table}")
     lines.append("")
 
     return "\n".join(lines)
@@ -449,6 +436,7 @@ def run_benchmark(
                 results=results,
                 normalized_results=normalized_results,
                 horizons=planning_horizons,
+                m=int(simulate_kwargs["m"]),
             ),
         )
 

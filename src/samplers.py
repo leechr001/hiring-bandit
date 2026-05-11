@@ -30,6 +30,14 @@ def _rng_gauss(rng: object, location: float, stddev: float) -> float:
     raise TypeError("rng must provide either gauss() or normal().")
 
 
+def _rng_uniform(rng: object, lower: float, upper: float) -> float:
+    uniform_fn = getattr(rng, "uniform", None)
+    if uniform_fn is not None:
+        return float(uniform_fn(lower, upper))
+
+    return lower + (upper - lower) * _rng_random(rng)
+
+
 def make_bernoulli_samplers(means: Sequence[float], rng: object):
     """
     Used for generation of rewards
@@ -37,6 +45,30 @@ def make_bernoulli_samplers(means: Sequence[float], rng: object):
     def sampler(p):
         return lambda: 1.0 if _rng_random(rng) < p else 0.0
     return [sampler(p) for p in means]
+
+
+def make_uniform_samplers(
+    intervals: Sequence[Tuple[float, float]],
+    rng: Optional[object] = None,
+):
+    """
+    Generate reward samplers from uniform distributions on per-arm intervals.
+    """
+    if rng is None:
+        rng = random.Random()
+
+    bounds = []
+    for lower, upper in intervals:
+        lower = float(lower)
+        upper = float(upper)
+        if lower > upper:
+            raise ValueError("Each uniform interval must satisfy lower <= upper.")
+        bounds.append((lower, upper))
+
+    def sampler(lower: float, upper: float):
+        return lambda: _rng_uniform(rng, lower, upper)
+
+    return [sampler(lower, upper) for lower, upper in bounds]
 
 
 def _normal_pdf(x: float) -> float:
@@ -123,6 +155,7 @@ def make_truncated_normal_samplers(
         return draw
 
     return [sampler(location) for location in locations]
+
 
 def make_uniform_delay_sampler(
     delay_upper: int,

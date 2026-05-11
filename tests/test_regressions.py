@@ -43,6 +43,7 @@ from samplers import (
     make_conditional_samplers,
     make_geometric_delay_sampler,
     make_truncated_normal_samplers,
+    make_uniform_samplers,
     make_uniform_delay_sampler,
 )
 from simulation import (
@@ -1148,6 +1149,32 @@ class RegressionTests(unittest.TestCase):
         self.assertTrue(np.all(draws <= 1.0))
         self.assertAlmostEqual(float(draws.mean()), 0.75, delta=0.03)
 
+    def test_uniform_samplers_support_per_arm_intervals(self) -> None:
+        samplers = make_uniform_samplers(
+            [(0.2, 0.4), (2.0, 5.0)],
+            random.Random(0),
+        )
+
+        low_draws = np.asarray([samplers[0]() for _ in range(4000)], dtype=np.float64)
+        high_draws = np.asarray([samplers[1]() for _ in range(4000)], dtype=np.float64)
+
+        self.assertTrue(np.all(low_draws >= 0.2))
+        self.assertTrue(np.all(low_draws <= 0.4))
+        self.assertAlmostEqual(float(low_draws.mean()), 0.3, delta=0.02)
+
+        self.assertTrue(np.all(high_draws >= 2.0))
+        self.assertTrue(np.all(high_draws <= 5.0))
+        self.assertAlmostEqual(float(high_draws.mean()), 3.5, delta=0.08)
+
+    def test_uniform_samplers_require_valid_intervals(self) -> None:
+        with self.assertRaises(ValueError):
+            make_uniform_samplers([(0.4, 0.2)], random.Random(0))
+
+    def test_uniform_samplers_allow_degenerate_intervals(self) -> None:
+        sampler = make_uniform_samplers([(0.4, 0.4)], random.Random(0))[0]
+
+        self.assertEqual(sampler(), 0.4)
+
     def test_reward_sampler_factory_supports_truncated_normal(self) -> None:
         factory = make_reward_sampler_factory(
             "truncated-normal",
@@ -1188,10 +1215,13 @@ class RegressionTests(unittest.TestCase):
         rng = np.random.default_rng(0)
         bernoulli_sampler = make_bernoulli_samplers([1.0], rng)[0]
         normal_sampler = make_truncated_normal_samplers([0.5], rng)[0]
+        uniform_sampler = make_uniform_samplers([(0.2, 0.4)], rng)[0]
 
         self.assertEqual(bernoulli_sampler(), 1.0)
         self.assertGreaterEqual(normal_sampler(), 0.0)
         self.assertLessEqual(normal_sampler(), 1.0)
+        self.assertGreaterEqual(uniform_sampler(), 0.2)
+        self.assertLessEqual(uniform_sampler(), 0.4)
 
 
 if __name__ == "__main__":

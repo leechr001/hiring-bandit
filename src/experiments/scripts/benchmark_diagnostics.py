@@ -183,14 +183,14 @@ def _worker(spec: DiagnosticsSeries, seed: int) -> EpisodeDiagnostics:
             T=T,
             c=c,
             rng=policy_rng,
-            omega_mean=omega_mean,
+            omega_mean=float(omega_mean),
             gamma=gamma,
             log_frontier_sizes=spec.policy_name == "delayed-replace-ucb",
         )
 
     oracle_reward = env.optimal_expected_reward()
     if oracle_reward is None:
-        raise ValueError("Expected true means to be available for diagnostics.")
+        raise ValueError("Expected true means nned to be available for diagnostics.")
 
     requested_replacements = 0
     rejected_replacements = 0

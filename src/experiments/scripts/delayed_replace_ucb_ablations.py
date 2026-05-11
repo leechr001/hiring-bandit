@@ -6,15 +6,13 @@ from pathlib import Path
 from experiments.helpers import benchmark_output_dir, make_benchmark_means
 from simulation import simulate
 from experiments.simulation_setups.config_main import (
-
     K,
     M,
-    N_JOBS,
     N_RUNS,
     OMEGA_MEAN,
     PERFORMANCE_MEANS,
     SWITCHING_COST,
-    SIMULATE_KWARGS,
+    PERFORMANCE_SAMPLERS,
     BASE_SEED
 )
 
@@ -79,11 +77,11 @@ def _run_summary(
             m=M,
             T=horizon_period,
             means=PERFORMANCE_MEANS,
+            reward_samplers=PERFORMANCE_SAMPLERS,
             delay_process_name="geometric",
             delay_geom_p=1/OMEGA_MEAN,
-            gamma=f"auto-{OMEGA_MEAN}",
+            gamma=f"auto={OMEGA_MEAN}",
             n_runs=N_RUNS,
-            n_jobs=N_JOBS,
             seed0=BASE_SEED,
             **simulate_kwargs,
         )
@@ -107,7 +105,9 @@ def main() -> None:
     benchmark_summary = _run_summary(
         policies=POLICIES,
         horizons=HORIZONS,
-        simulate_kwargs={},
+        simulate_kwargs={
+            'c': SWITCHING_COST
+        },
     )
 
     stress_summaries: dict[str, dict[str, dict[str, dict[str, float]]]] = {}
