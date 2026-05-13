@@ -108,6 +108,7 @@ class TemporaryHiringBanditEnv:
         self.active_set: Set[int] = set()
         self.pending: List[PendingReplacement] = []
         self.pending_workers: Set[int] = set()
+        self._replacement_completion_time_cache: Dict[Tuple[int, int, int], int] = {}
 
         if initial_workforce is None:
             initial_workforce = list(range(1, m + 1))
@@ -128,6 +129,7 @@ class TemporaryHiringBanditEnv:
         self.active_set = set(init)
         self.pending = []
         self.pending_workers = set()
+        self._replacement_completion_time_cache = {}
         return self._get_obs()
 
     def _get_obs(self) -> EnvObservation:
@@ -232,6 +234,33 @@ class TemporaryHiringBanditEnv:
 
         return accepted
 
+    def replacement_completion_time(
+        self,
+        pair: Tuple[int, int],
+        *,
+        start_time: Optional[int] = None,
+    ) -> int:
+        """
+        Return the environment-assigned completion time for a candidate replacement.
+
+        Completion times are cached within a period so policies that inspect a
+        candidate replacement see the same completion time the environment will
+        use if that replacement is accepted in ``step``.
+        """
+        if start_time is None:
+            start_time = self.t
+        start_time = int(start_time)
+        i, j = int(pair[0]), int(pair[1])
+        key = (i, j, start_time)
+
+        if key not in self._replacement_completion_time_cache:
+            omega = int(self.delay_sampler((i, j), start_time))
+            if omega < 0:
+                raise ValueError("delay_sampler returned a negative omega.")
+            self._replacement_completion_time_cache[key] = start_time + omega
+
+        return int(self._replacement_completion_time_cache[key])
+
     def step(
         self,
         replacements: Optional[Sequence[Tuple[int, int]]] = None
@@ -262,16 +291,15 @@ class TemporaryHiringBanditEnv:
 
         cost = self.c * len(accepted_replacements)
         for (i, j) in accepted_replacements:
-            omega = int(self.delay_sampler((i, j), self.t))
-            if omega < 0:
-                raise ValueError("delay_sampler returned a negative omega.")
+            completion_time = self.replacement_completion_time((i, j), start_time=self.t)
+            omega = int(completion_time) - int(self.t)
             accepted_delays.append(omega)
             self.pending.append(
                 PendingReplacement(
                     i=i,
                     j=j,
                     start_time=self.t,
-                    completion_time=self.t + omega
+                    completion_time=completion_time
                 )
             )
             self.pending_workers.add(i)
@@ -314,6 +342,7 @@ class TemporaryHiringBanditEnv:
 
         # Advance time
         self.t += 1
+        self._replacement_completion_time_cache = {}
         return self._get_obs(), total, cost, feedback
 
     # --- Convenience helpers ---

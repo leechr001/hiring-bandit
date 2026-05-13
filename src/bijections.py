@@ -21,12 +21,20 @@ def make_bijection(bijection_name:str) -> Callable:
     """
     Factory to build bijections that be reused between policies.
     """
-    if bijection_name.lower() in ('random', 'stochastic'):
+    normalized_name = bijection_name.lower().strip()
+    if normalized_name in ('random', 'stochastic'):
         return random_bijection
-    elif bijection_name.lower() in ('oracle-match', 'rank-matching', 'rm', 'best'):
+    elif normalized_name in ('oracle-match', 'rank-matching', 'rm', 'best'):
         return _ignore_rng(oracle_rank_matching_bijection)
-    elif bijection_name.lower() in ('oracle-mismatch', 'rank-mismatching', 'rmm', 'worst'):
+    elif normalized_name in ('oracle-mismatch', 'rank-mismatching', 'rmm', 'worst'):
         return _ignore_rng(oracle_rank_mismatching_bijection)
+    elif normalized_name in (
+        'oracle-delayed-decision',
+        'oracle_delayed_decision',
+        'delayed-decision',
+        'delayed_decision',
+    ):
+        return oracle_delayed_decision_bijection
     
     raise ValueError(f"{bijection_name} is not recognized")
 
@@ -35,6 +43,7 @@ def random_bijection(
     target: Sequence[int],
     *,
     rng: Optional[random.Random] = None,
+    **_kwargs,
 ) -> List[Tuple[int, int]]:
     """
     Construct a random bijection, needed to adapt policies
@@ -51,6 +60,56 @@ def random_bijection(
     else:
         rng.shuffle(add)
     return list(zip(remove, add))
+
+
+def oracle_delayed_decision_bijection(
+    current: Sequence[int],
+    target: Sequence[int],
+    *,
+    true_means: Optional[Sequence[float]] = None,
+    replacement_completion_time: Optional[Callable[[Tuple[int, int]], int]] = None,
+    **_kwargs,
+) -> List[Tuple[int, int]]:
+    """
+    Pair the worst outgoing workers with the fastest incoming workers.
+
+    Outgoing workers are processed from lowest to highest true mean. For each
+    outgoing worker, the remaining incoming worker with the earliest
+    environment-assigned completion time is selected.
+    """
+    if true_means is None:
+        raise ValueError("true_means is required for oracle_delayed_decision.")
+    if replacement_completion_time is None:
+        raise ValueError(
+            "replacement_completion_time is required for oracle_delayed_decision."
+        )
+
+    cur_set = set(current)
+    tar_set = set(target)
+
+    remove = sorted(cur_set - tar_set)
+    add = sorted(tar_set - cur_set)
+
+    if len(remove) != len(add):
+        n = min(len(remove), len(add))
+        remove, add = remove[:n], add[:n]
+
+    remove.sort(key=lambda worker_id: (float(true_means[worker_id - 1]), worker_id))
+
+    pairs: List[Tuple[int, int]] = []
+    remaining_add = list(add)
+    for remove_id in remove:
+        best_add = min(
+            remaining_add,
+            key=lambda add_id: (
+                int(replacement_completion_time((int(remove_id), int(add_id)))),
+                add_id,
+            ),
+        )
+        remaining_add.remove(best_add)
+        pairs.append((int(remove_id), int(best_add)))
+
+    return pairs
 
 def oracle_rank_matching_bijection(
     current: Sequence[int],

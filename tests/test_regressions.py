@@ -23,6 +23,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
 from bijections import (
     delayed_replace_ucb_rank_matching_bijection,
     delayed_replace_ucb_switching_threshold,
+    oracle_delayed_decision_bijection,
 )
 from bandit_environment import PendingReplacement, StepFeedback, TemporaryHiringBanditEnv
 from choose_target import choose_target
@@ -30,6 +31,7 @@ from delayed_replace_ucb import DelayedReplaceUCB
 from experiments.helpers import _json_safe_metadata
 from policies import (
     AdaptedAHTPolicy,
+    AdaptedOMM,
     FixedScheduleGreedy,
     PreScreen,
     StatefulDelayedActionPolicy,
@@ -537,6 +539,108 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(target, {1, 4, 5})
         self.assertEqual(pairs, [(2, 4), (3, 5)])
+
+    def test_oracle_delayed_decision_matches_worst_leaving_to_fastest_available(self) -> None:
+        true_means = [0.9, 0.1, 0.3, 0.8, 0.7, 0.6]
+        delays = {
+            (2, 4): 5,
+            (2, 5): 1,
+            (2, 6): 3,
+            (3, 4): 0,
+            (3, 6): 2,
+            (1, 6): 7,
+        }
+
+        pairs = oracle_delayed_decision_bijection(
+            current=[1, 2, 3],
+            target=[4, 5, 6],
+            true_means=true_means,
+            replacement_completion_time=lambda pair: 8 + delays[pair],
+        )
+
+        self.assertEqual(pairs, [(2, 5), (3, 4), (1, 6)])
+
+    def test_oracle_delayed_decision_factory_uses_environment_context(self) -> None:
+        class FakeEnv:
+            true_means = [0.9, 0.1, 0.3, 0.8, 0.7, 0.6]
+            t = 8
+
+            @staticmethod
+            def replacement_completion_time(pair):
+                return 8 + {
+                    (2, 4): 5,
+                    (2, 5): 1,
+                    (2, 6): 3,
+                    (3, 4): 0,
+                    (3, 6): 2,
+                    (1, 6): 7,
+                }[pair]
+
+        policy = AdaptedOMM(
+            k=6,
+            m=3,
+            bijection_name="oracle_delayed_decision",
+            rng=random.Random(0),
+        )
+
+        pairs = policy.build_proposed_replacements(
+            active=[1, 2, 3],
+            target=[4, 5, 6],
+            env=FakeEnv(),
+        )
+
+        self.assertEqual(pairs, [(2, 5), (3, 4), (1, 6)])
+
+    def test_delayed_replace_ucb_supports_oracle_delayed_decision_pairing(self) -> None:
+        class FakeEnv:
+            true_means = [0.9, 0.1, 0.3, 0.8, 0.7, 0.6]
+            t = 8
+            c = 0.0
+
+            @staticmethod
+            def replacement_completion_time(pair):
+                return 8 + {
+                    (2, 4): 5,
+                    (2, 5): 1,
+                    (2, 6): 3,
+                    (3, 4): 0,
+                    (3, 6): 2,
+                    (1, 6): 7,
+                }[pair]
+
+        policy = DelayedReplaceUCB(
+            k=6,
+            m=3,
+            gamma=1.0,
+            horizon=10,
+            pairing_rule="oracle_delayed_decision",
+            rng=random.Random(0),
+        )
+
+        pairs = policy.build_proposed_replacements(
+            active=[1, 2, 3],
+            target=[4, 5, 6],
+            env=FakeEnv(),
+        )
+
+        self.assertEqual(pairs, [(2, 5), (3, 4), (1, 6)])
+
+    def test_environment_reuses_previewed_replacement_completion_time(self) -> None:
+        delays = iter([4, 9])
+        env = TemporaryHiringBanditEnv(
+            k=3,
+            m=1,
+            reward_samplers=[lambda: 0.0, lambda: 0.0, lambda: 0.0],
+            delay_sampler=lambda pair, t: next(delays),
+            true_means=[0.1, 0.2, 0.3],
+        )
+
+        completion_time = env.replacement_completion_time((1, 2))
+        _, _, _, feedback = env.step([(1, 2)])
+
+        self.assertEqual(completion_time, 5)
+        self.assertEqual(feedback.accepted_delays, (4,))
+        self.assertEqual(next(delays), 9)
 
     def test_choose_target_matches_bruteforce_enumeration_on_small_instance(self) -> None:
         active_set = [1, 2, 3]

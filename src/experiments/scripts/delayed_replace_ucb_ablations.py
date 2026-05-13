@@ -25,7 +25,10 @@ POLICIES = [
     ("delayed-replace-ucb", "DR-UCB"),
     ("delayed-replace-ucb-fixed-calendar", "DR-UCB + fixed calendar switching"),
     ("delayed-replace-ucb-no-screen", "DR-UCB without horizon screening"),
-    ("delayed-replace-ucb-random-pairing", "DR-UCB + random pairing"),
+    (
+        "delayed-replace-ucb-oracle-delayed-decision",
+        "DR-UCB + oracle delayed-decision pairing",
+    ),
 ]
 
 HORIZONS = [

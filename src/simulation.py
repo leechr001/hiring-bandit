@@ -74,6 +74,7 @@ def _display_policy_name(policy_name: str) -> str:
         "delayed-replace-ucb-fixed-calendar": "DR-UCB + fixed calendar switching",
         "delayed-replace-ucb-no-screen": "DR-UCB without horizon screening",
         "delayed-replace-ucb-random-pairing": "DR-UCB + random pairing",
+        "delayed-replace-ucb-oracle-delayed-decision": "DR-UCB + oracle delayed decision",
         "a-aht": "A-AHT",
         "a-aht-rm": "A-AHT with rank-matching bijection",
         "a-aht-rmm": "A-AHT with rank-mismatching bijection",
@@ -902,6 +903,7 @@ def make_policy(
       - "delayed-replace-ucb-fixed-calendar"
       - "delayed-replace-ucb-no-screen"
       - "delayed-replace-ucb-random-pairing"
+      - "delayed-replace-ucb-oracle-delayed-decision"
       - "a-aht"
       - "a-aht-rm"
       - "a-aht-rmm"
@@ -1055,6 +1057,25 @@ def make_policy(
             rng=rng,
             log_frontier_sizes=log_frontier_sizes,
             pairing_rule="random",
+        )
+
+    elif name == "delayed-replace-ucb-oracle-delayed-decision":
+        resolved_gamma = _resolve_delayed_replace_ucb_gamma(
+            gamma,
+            k=k,
+            m=m,
+            T=T,
+            c=c,
+            omega_mean=omega_mean,
+        )
+        return DelayedReplaceUCB(
+            k=k,
+            m=m,
+            gamma=resolved_gamma,
+            horizon=T,
+            rng=rng,
+            log_frontier_sizes=log_frontier_sizes,
+            pairing_rule="oracle-delayed-decision",
         )
 
     elif name == "a-aht":

@@ -93,7 +93,13 @@ class DelayedActionPolicy(ABC):
         target: Sequence[int],
         env,
     ) -> List[Tuple[int, int]]:
-        return self._bijection_fn(active, target, rng=self.rng)
+        return self._bijection_fn(
+            active,
+            target,
+            rng=self.rng,
+            true_means=getattr(env, "true_means", None),
+            replacement_completion_time=getattr(env, "replacement_completion_time", None),
+        )
 
     def _propose_replacements_from_target(
         self,

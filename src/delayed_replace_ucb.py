@@ -1,6 +1,7 @@
 from bandit_environment import StepFeedback
 from bijections import (
     delayed_replace_ucb_rank_matching_bijection,
+    oracle_delayed_decision_bijection,
     random_bijection,
 )
 from choose_target import ChooseTargetFrontierSizeRecord, choose_target
@@ -83,10 +84,20 @@ class DelayedReplaceUCB(StatefulDelayedActionPolicy):
                 "calendar can be precomputed before the run starts."
             )
         pairing_rule_normalized = pairing_rule.strip().lower()
-        if pairing_rule_normalized not in {"rank-matching", "random"}:
+        if pairing_rule_normalized in {"oracle_delayed_decision", "delayed_decision"}:
+            pairing_rule_normalized = pairing_rule_normalized.replace("_", "-")
+        if pairing_rule_normalized not in {
+            "rank-matching",
+            "random",
+            "oracle-delayed-decision",
+            "delayed-decision",
+        }:
             raise ValueError(
-                "pairing_rule must be 'rank-matching' or 'random'."
+                "pairing_rule must be 'rank-matching', 'random', or "
+                "'oracle-delayed-decision'."
             )
+        if pairing_rule_normalized == "delayed-decision":
+            pairing_rule_normalized = "oracle-delayed-decision"
 
         self.cfg = DelayedReplaceUCBConfig(
             k=k,
@@ -390,6 +401,8 @@ class DelayedReplaceUCB(StatefulDelayedActionPolicy):
         *,
         current_period: Optional[int] = None,
         switching_cost: float = 0.0,
+        true_means: Optional[Sequence[float]] = None,
+        replacement_completion_time=None,
     ) -> List[Tuple[int, int]]:
         """
         Construct the configured replacement bijection.
@@ -409,12 +422,19 @@ class DelayedReplaceUCB(StatefulDelayedActionPolicy):
         -------
         List of (remove_id, add_id) replacement pairs.
         """
-        ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
         if self.cfg.pairing_rule == "rank-matching":
+            ucb = self.ucb_values()  # ucb[i] corresponds to worker (i+1)
             return delayed_replace_ucb_rank_matching_bijection(
                 current,
                 target,
                 ucb_values=ucb.tolist(),
+            )
+        if self.cfg.pairing_rule == "oracle-delayed-decision":
+            return oracle_delayed_decision_bijection(
+                current,
+                target,
+                true_means=true_means,
+                replacement_completion_time=replacement_completion_time,
             )
         return random_bijection(
             current,
@@ -457,4 +477,6 @@ class DelayedReplaceUCB(StatefulDelayedActionPolicy):
             target,
             current_period=env.t,
             switching_cost=env.c,
+            true_means=getattr(env, "true_means", None),
+            replacement_completion_time=getattr(env, "replacement_completion_time", None),
         )
