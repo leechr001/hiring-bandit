@@ -12,7 +12,7 @@ CONFIG_NAME = "main_5_25"
 
 K = 25
 M = 5
-T = HORIZON = 365
+T = HORIZON = 365 * 2
 SWITCHING_COST = 5
 
 OMEGA_MEAN = 3
@@ -43,6 +43,7 @@ DEFAULT_PLANNING_HORIZONS = (
     ("3 months", int(365 / 4)),
     ("6 months", int(365 / 2)),
     ("12 months", 365),
+    ("24 months", 365 * 2),
 )
 
 

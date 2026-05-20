@@ -28,7 +28,12 @@ from bijections import (
 from bandit_environment import PendingReplacement, StepFeedback, TemporaryHiringBanditEnv
 from choose_target import choose_target
 from delayed_replace_ucb import DelayedReplaceUCB
-from experiments.helpers import _json_safe_metadata
+from experiments.helpers import (
+    _json_safe_metadata,
+    instance_dependent_lower_bound_series,
+    minimax_lower_bound_series,
+    startup_cost_series,
+)
 from policies import (
     AdaptedAHTPolicy,
     AdaptedOMM,
@@ -57,6 +62,7 @@ from simulation import (
     compute_delayed_replace_ucb_auto_gamma,
     make_policy,
     delayed_replace_ucb_regret_bound,
+    run_series_simulations,
     simulate,
 )
 
@@ -1220,6 +1226,53 @@ class RegressionTests(unittest.TestCase):
         self.assertAlmostEqual(float(rows[0]["A-OMM normalized"]), 3.0 / 1.7)
         self.assertIsNone(rows[1]["A-OMM cumulative"])
         self.assertIsNone(rows[1]["A-OMM normalized"])
+
+    def test_lower_bound_series_generate_deterministic_curves(self) -> None:
+        means, results = run_series_simulations(
+            series=[
+                minimax_lower_bound_series(),
+                instance_dependent_lower_bound_series(),
+            ],
+            simulate_kwargs={
+                "k": 4,
+                "m": 2,
+                "T": 4,
+                "means": [0.9, 0.8, 0.5, 0.3],
+                "c": 2.0,
+            },
+        )
+
+        minimax_mean, minimax_std = results["Minimax lower bound"]
+        instance_mean, instance_std = results["Instance-dependent lower bound"]
+
+        expected_minimax = np.sqrt(2.0 * 4.0 * np.arange(1, 5)) + 2.0 * 4.0
+        np.testing.assert_allclose(minimax_mean, expected_minimax)
+        np.testing.assert_allclose(minimax_std, np.zeros(4))
+
+        expected_instance = np.log(np.arange(1, 5)) * (
+            (1.0 / (0.8 - 0.5)) + (1.0 / (0.8 - 0.3)) + 2.0 * 4.0
+        )
+        np.testing.assert_allclose(instance_mean, expected_instance)
+        np.testing.assert_allclose(instance_std, np.zeros(4))
+        self.assertEqual(list(means), [0.9, 0.8, 0.5, 0.3])
+
+    def test_startup_cost_series_generates_deterministic_curve(self) -> None:
+        means, results = run_series_simulations(
+            series=[startup_cost_series()],
+            simulate_kwargs={
+                "k": 5,
+                "m": 2,
+                "T": 5,
+                "means": [0.9, 0.8, 0.7, 0.6, 0.5],
+                "c": 3.0,
+            },
+        )
+
+        startup_mean, startup_std = results["Startup Cost"]
+
+        np.testing.assert_allclose(startup_mean, [3.0, 6.0, 9.0, 9.0, 9.0])
+        np.testing.assert_allclose(startup_std, np.zeros(5))
+        self.assertEqual(list(means), [0.9, 0.8, 0.7, 0.6, 0.5])
 
     def test_benchmark_metadata_sanitizes_custom_sampler_functions(self) -> None:
         def reward_sampler() -> float:

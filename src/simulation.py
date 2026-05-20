@@ -75,6 +75,14 @@ def _display_policy_name(policy_name: str) -> str:
         "delayed-replace-ucb-no-screen": "DR-UCB without horizon screening",
         "delayed-replace-ucb-random-pairing": "DR-UCB + random pairing",
         "delayed-replace-ucb-oracle-delayed-decision": "DR-UCB + oracle delayed decision",
+        "minimax-lower-bound": "Minimax lower bound",
+        "minimax_lower_bound": "Minimax lower bound",
+        "instance-independent-lower-bound": "Instance-independent lower bound",
+        "instance_independent_lower_bound": "Instance-independent lower bound",
+        "instance-dependent-lower-bound": "Instance-dependent lower bound",
+        "instance_dependent_lower_bound": "Instance-dependent lower bound",
+        "startup-cost": "Startup Cost",
+        "startup_cost": "Startup Cost",
         "a-aht": "A-AHT",
         "a-aht-rm": "A-AHT with rank-matching bijection",
         "a-aht-rmm": "A-AHT with rank-mismatching bijection",
@@ -274,6 +282,78 @@ def make_reward_sampler_factory(
         "reward_process_name must be one of: 'bernoulli', 'binary', "
         "'truncated-normal', 'truncnorm', or 'tn'."
     )
+
+
+_INSTANCE_INDEPENDENT_LOWER_BOUND_NAMES = {
+    "minimax-lower-bound",
+    "minimax_lower_bound",
+    "lower-bound-minimax",
+    "lower_bound_minimax",
+    "instance-independent-lower-bound",
+    "instance-independent_lower_bound",
+    "lower-bound-instance-independent",
+    "lower_bound_instance_independent",
+}
+_INSTANCE_DEPENDENT_LOWER_BOUND_NAMES = {
+    "instance-dependent-lower-bound",
+    "instance_dependent_lower_bound",
+    "instance-dependence-lower-bound",
+    "instance_dependence_lower_bound",
+    "lower-bound-instance-dependent",
+    "lower_bound_instance_dependent",
+}
+_STARTUP_COST_POLICY_NAMES = {
+    "startup-cost",
+    "startup_cost",
+}
+_LOWER_BOUND_POLICY_NAMES = (
+    _INSTANCE_INDEPENDENT_LOWER_BOUND_NAMES
+    | _INSTANCE_DEPENDENT_LOWER_BOUND_NAMES
+    | _STARTUP_COST_POLICY_NAMES
+)
+
+
+def _normalize_policy_name(policy_name: str) -> str:
+    return policy_name.lower().strip()
+
+
+def _is_lower_bound_policy(policy_name: str) -> bool:
+    return _normalize_policy_name(policy_name) in _LOWER_BOUND_POLICY_NAMES
+
+
+def _lower_bound_policy_curve(
+    policy_name: str,
+    *,
+    means: Sequence[float],
+    k: int,
+    m: int,
+    T: int,
+    c: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    periods = np.arange(1, int(T) + 1, dtype=np.float64)
+    normalized_name = _normalize_policy_name(policy_name)
+
+    if normalized_name in _INSTANCE_INDEPENDENT_LOWER_BOUND_NAMES:
+        mean_curve = np.sqrt(float(m) * float(k) * periods) + float(c) * np.minimum(float(k - m), periods)
+    elif normalized_name in _INSTANCE_DEPENDENT_LOWER_BOUND_NAMES:
+        ordered_means = sorted((float(mu) for mu in means), reverse=True)
+        if not (1 <= int(m) <= len(ordered_means)):
+            raise ValueError("m must be between 1 and len(means) for lower bounds.")
+        mu_m = ordered_means[int(m)-1]
+        gaps = [mu_m - mu_i for mu_i in ordered_means[int(m):]]
+        if any(gap <= 0.0 for gap in gaps):
+            raise ValueError(
+                "Instance-dependent lower bound requires positive gaps below mu_m."
+            )
+        lower_bound_scale = sum(1.0 / 4*gap for gap in gaps)
+        mean_curve = np.log(periods) * lower_bound_scale + float(c) * np.minimum(float(k - m), periods)
+    elif normalized_name in _STARTUP_COST_POLICY_NAMES:
+        mean_curve = np.minimum(float(k - m), periods) * float(c)
+    else:
+        raise ValueError(f"{policy_name} is not a lower-bound policy.")
+
+    std_curve = np.zeros_like(mean_curve)
+    return mean_curve, std_curve
 
 
 def run_series_simulations(
@@ -1300,6 +1380,11 @@ def simulate(
 ) -> Tuple[Sequence[float], Dict[str, Tuple[np.ndarray, np.ndarray]]]:
     # Simple mean profile with a clear top-m
     rng = random.Random(999)
+    policy_names = list(policies)
+    non_lower_bound_policy_names = [
+        policy_name for policy_name in policy_names
+        if not _is_lower_bound_policy(policy_name)
+    ]
     user_supplied_reward_samplers = reward_samplers is not None
     user_supplied_delay_sampler = delay_sampler is not None
     user_supplied_reward_factory = reward_sampler_factory is not None
@@ -1325,15 +1410,22 @@ def simulate(
         parameter_name="cost",
         default_value=0.0,
     )
-    resolved_omega_mean = _resolve_policy_omega_mean(
-        omega_mean=omega_mean,
-        delay_process_name=delay_process_name,
-        delay_lower=delay_lower,
-        delay_upper=delay_upper,
-        delay_geom_p=delay_geom_p,
-    )
+    if non_lower_bound_policy_names:
+        resolved_omega_mean = _resolve_policy_omega_mean(
+            omega_mean=omega_mean,
+            delay_process_name=delay_process_name,
+            delay_lower=delay_lower,
+            delay_upper=delay_upper,
+            delay_geom_p=delay_geom_p,
+        )
+    else:
+        resolved_omega_mean = float(omega_mean or 0.0)
     
-    if reward_samplers is None and reward_sampler_factory is None:
+    if (
+        non_lower_bound_policy_names
+        and reward_samplers is None
+        and reward_sampler_factory is None
+    ):
         reward_sampler_factory = make_reward_sampler_factory(
             reward_process_name,
             means=means,
@@ -1342,7 +1434,11 @@ def simulate(
             reward_upper=reward_upper,
         )
     
-    if delay_sampler is None and delay_sampler_factory is None:
+    if (
+        non_lower_bound_policy_names
+        and delay_sampler is None
+        and delay_sampler_factory is None
+    ):
         delay_sampler_factory = make_delay_sampler_factory(
             delay_process_name,
             means=means,
@@ -1366,7 +1462,7 @@ def simulate(
         or user_supplied_delay_sampler
         or user_supplied_reward_factory
         or user_supplied_delay_factory
-    ):
+    ) and non_lower_bound_policy_names:
         raise ValueError(
             "Parallel simulate() currently supports only built-in reward/delay process settings, "
             "not custom sampler objects or factories."
@@ -1374,7 +1470,18 @@ def simulate(
 
     results: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
 
-    for pname in policies:
+    for pname in policy_names:
+        if _is_lower_bound_policy(pname):
+            results[pname] = _lower_bound_policy_curve(
+                pname,
+                means=means,
+                k=k,
+                m=m,
+                T=T,
+                c=c,
+            )
+            continue
+
         if n_jobs == 1:
             curves = []
             for r in range(n_runs):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from simulation import ExperimentSeries
-from samplers import make_uniform_samplers
+from samplers import make_bernoulli_samplers
 
 
 BASE_SEED = 12345
@@ -12,29 +12,22 @@ CONFIG_NAME = "main_10_25"
 
 K = 25
 M = 10
-T = HORIZON = 365 * 2
+T = HORIZON = 365
 SWITCHING_COST = 5
 
 OMEGA_MEAN = 3
 
 N_RUNS = 250
 N_JOBS = 1
-WORK_TRIAL_ROTATION_PERIODS = 90
 
 rng = np.random.default_rng(BASE_SEED)
-PERFORMANCE_MEANS = np.clip(
-    rng.normal(0.5, 0.3, size=K), 
-    0,1).tolist()
+PERFORMANCE_MEANS = [1/2 for _ in range(M)] + [1/4 for _ in range(K-M)]
 
-gaps = [min(0.1, abs(x), abs(1-x)) for x in PERFORMANCE_MEANS]
-intervals = [(x - gap, x + gap) for (x,gap) in zip(PERFORMANCE_MEANS, gaps)]
 
-PERFORMANCE_SAMPLERS = make_uniform_samplers(
-    intervals=intervals,
+PERFORMANCE_SAMPLERS = make_bernoulli_samplers(
+    means=PERFORMANCE_MEANS,
     rng=rng)
 
-INTERVIEW_RHO = 0.3
-INTERVIEW_COST = SWITCHING_COST
 
 DEFAULT_CUMULATIVE_TITLE = "Regret of DR-UCB Compared to Benchmarks"
 DEFAULT_AVERAGE_TITLE = "Normalized Loss of DR-UCB Compared to Benchmarks"
@@ -43,7 +36,6 @@ DEFAULT_PLANNING_HORIZONS = (
     ("3 months", int(365 / 4)),
     ("6 months", int(365 / 2)),
     ("12 months", 365),
-    ("24 months", int(365 * 2)),
 )
 
 
@@ -72,22 +64,6 @@ def adapted_omm_series(*, label: str = "Adapted-OMM") -> ExperimentSeries:
         label=label,
     )
 
-
-def interview_screen_series() -> ExperimentSeries:
-    return ExperimentSeries(
-        policy_name="pre-screen",
-        label="InterviewScreen",
-        sim_kwargs={"rho": INTERVIEW_RHO, "cost": INTERVIEW_COST * K},
-    )
-
-
-def work_trial_series() -> ExperimentSeries:
-    return ExperimentSeries(
-        policy_name="WorkTrial",
-        label="WorkTrial",
-        sim_kwargs={"rho": INTERVIEW_RHO, "cost": INTERVIEW_COST * K},
-    )
-
 def lower_bound_instance_ind() -> ExperimentSeries:
     return ExperimentSeries(
         policy_name="instance-independent-lower-bound",
@@ -107,27 +83,15 @@ def ck() -> ExperimentSeries:
     )
 
 
-def bandit_series(*, omega_mean: float = OMEGA_MEAN) -> list[ExperimentSeries]:
+def lower_bound_series(*, omega_mean: float = OMEGA_MEAN) -> list[ExperimentSeries]:
     return [
         delayed_replace_ucb_series(omega_mean=omega_mean),
         adapted_aht_series(),
-        adapted_omm_series()
+        adapted_omm_series(),
+        lower_bound_instance_dep(),
+        #ck()
     ]
 
-
-def heuristic_series(*, omega_mean: float = OMEGA_MEAN) -> list[ExperimentSeries]:
-    return [
-        delayed_replace_ucb_series(omega_mean=omega_mean),
-        interview_screen_series(),
-        work_trial_series(),
-    ]
-
-
-def benchmark_series(*, omega_mean: float = OMEGA_MEAN) -> list[ExperimentSeries]:
-    return bandit_series(omega_mean=omega_mean) + [
-        interview_screen_series(),
-        work_trial_series(),
-    ]
 
 
 def delay_kwargs_for_omega_mean(
@@ -165,7 +129,6 @@ def benchmark_simulate_kwargs(
         "n_runs": N_RUNS,
         "n_jobs": N_JOBS,
         "seed0": BASE_SEED,
-        "work_trial_rotation_periods": WORK_TRIAL_ROTATION_PERIODS,
         **delay_kwargs_for_omega_mean(omega_mean=omega_mean),
     }
     kwargs.update(overrides)
@@ -175,11 +138,6 @@ def benchmark_simulate_kwargs(
 DELAYED_REPLACE_UCB = delayed_replace_ucb_series()
 A_AHT = adapted_aht_series()
 A_OMM = adapted_omm_series()
-INTERVIEW_SCREEN = interview_screen_series()
-WORK_TRIAL = work_trial_series()
 
-BANDIT_SERIES = bandit_series()
-HEURISTIC_SERIES = heuristic_series()
-BENCHMARK_SERIES = benchmark_series()
-ALL_SERIES = BENCHMARK_SERIES
+LOWER_BOUND_SERIES = lower_bound_series()
 SIMULATE_KWARGS = benchmark_simulate_kwargs()

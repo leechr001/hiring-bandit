@@ -73,6 +73,69 @@ def default_benchmark_series(
     ]
 
 
+def minimax_lower_bound_series(
+    *,
+    label: str = "Minimax lower bound",
+    plot_kwargs: Optional[Mapping[str, Any]] = None,
+) -> ExperimentSeries:
+    kwargs = {
+        "color": "#111111",
+        "linestyle": "--",
+        "marker": None,
+        "linewidth": 2,
+    }
+    if plot_kwargs:
+        kwargs.update(dict(plot_kwargs))
+    return ExperimentSeries(
+        policy_name="minimax-lower-bound",
+        label=label,
+        plot_kwargs=kwargs,
+        band_alpha=0.0,
+    )
+
+
+def instance_dependent_lower_bound_series(
+    *,
+    label: str = "Instance-dependent lower bound",
+    plot_kwargs: Optional[Mapping[str, Any]] = None,
+) -> ExperimentSeries:
+    kwargs = {
+        "color": "#555555",
+        "linestyle": ":",
+        "marker": None,
+        "linewidth": 2,
+    }
+    if plot_kwargs:
+        kwargs.update(dict(plot_kwargs))
+    return ExperimentSeries(
+        policy_name="instance-dependent-lower-bound",
+        label=label,
+        plot_kwargs=kwargs,
+        band_alpha=0.0,
+    )
+
+
+def startup_cost_series(
+    *,
+    label: str = "Startup Cost",
+    plot_kwargs: Optional[Mapping[str, Any]] = None,
+) -> ExperimentSeries:
+    kwargs = {
+        "color": "#777777",
+        "linestyle": "-.",
+        "marker": None,
+        "linewidth": 2,
+    }
+    if plot_kwargs:
+        kwargs.update(dict(plot_kwargs))
+    return ExperimentSeries(
+        policy_name="startup-cost",
+        label=label,
+        plot_kwargs=kwargs,
+        band_alpha=0.0,
+    )
+
+
 def _slug(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
 

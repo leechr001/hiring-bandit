@@ -5,12 +5,12 @@ from experiments.helpers import benchmark_output_dir
 from experiments.simulation_setups.config_main import (
     BANDIT_SERIES,
     HORIZON,
-    benchmark_simulate_kwargs,
+    benchmark_simulate_kwargs
 )
 from simulation import _average_regret_results, run_series_simulations
 
 
-c_values = [1,3,7,30,60,90]
+c_values = [3,7,30,60,90]
 
 series = BANDIT_SERIES
 output_dir = benchmark_output_dir(module_file=__file__, output_subdir="sweep_c")
@@ -88,6 +88,7 @@ def main() -> None:
 
     plt.xlabel("Switching cost c")
     plt.ylabel(f"Normalized loss at T = {HORIZON}")
+    plt.yscale("log")
     plt.title("Final Normalized Loss vs Switching Cost")
     plt.gca().yaxis.set_major_formatter(PercentFormatter(xmax=1.0, decimals=0))
     plt.grid(True, which="both", linestyle="--", alpha=0.5)
